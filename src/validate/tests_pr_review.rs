@@ -69,6 +69,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::multi_lifecycle_normalized_in_pr_review",
             func: multi_lifecycle_normalized_in_pr_review,
         },
+        ConformanceTest {
+            name: "pr_review::ready_staged_no_marker_dispatches",
+            func: ready_staged_no_marker_dispatches,
+        },
+        ConformanceTest {
+            name: "pr_review::stranded_no_lifecycle_recovered_via_marker",
+            func: stranded_no_lifecycle_recovered_via_marker,
+        },
     ]
 }
 
@@ -1732,6 +1740,225 @@ fn multi_lifecycle_normalized_in_pr_review(h: &RalphHarness) -> TestResult {
         assert!(
             log_content.contains("ralph:failed"),
             "label log should show ralph:failed being added, got: {log_content}"
+        );
+    })
+}
+
+/// Verify that a `ralph:ready` issue with staged PR-review amendments but
+/// NO resume-pending marker is dispatched by `pr_review_phase` (not skipped
+/// by either path).
+fn ready_staged_no_marker_dispatches(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment WITHOUT setting the resume-pending marker.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Verify no marker exists at the start.
+        assert!(
+            !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "no resume-pending marker should exist at start"
+        );
+
+        let label_log = dh.temp_dir.path().join("ready_staged.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has ralph:ready (NOT ralph:completed) and NO marker.
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // pr_review_phase should have picked up the ralph:ready task.
+        assert!(
+            stderr.contains("pr-review: resuming ralph:ready task"),
+            "stderr should log resume of ralph:ready task, got: {stderr}"
+        );
+
+        // Verify label swap occurred (ready → in-progress).
+        assert!(
+            label_log.exists(),
+            "label log should exist after label swap"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:in-progress"),
+            "label log should contain ralph:in-progress swap, got: {log_content}"
+        );
+
+        // Verify staged amendments were drained.
+        assert!(
+            !has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should have been drained during dispatch"
+        );
+    })
+}
+
+/// Verify that a stranded issue (resume-pending marker present, no lifecycle
+/// label) is recovered by re-adding `ralph:ready` and then dispatching.
+/// This covers the case where forward-add and rollback-add both failed in a
+/// prior cycle, leaving the issue with no lifecycle label.
+fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Set the resume-pending marker (simulating prior failed swap).
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
+        let label_log = dh.temp_dir.path().join("stranded_recovery.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has NO lifecycle label — only ralph:pr-review remains.
+        // This simulates the stranded state after a failed swap+rollback.
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify recovery was logged.
+        assert!(
+            stderr.contains("pr-review: recovered stranded issue #42"),
+            "stderr should log stranded issue recovery, got: {stderr}"
+        );
+
+        // Verify the label log shows ralph:ready was re-added and then
+        // swapped to ralph:in-progress.
+        assert!(
+            label_log.exists(),
+            "label log should exist after recovery"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:ready"),
+            "label log should show ralph:ready re-add, got: {log_content}"
+        );
+        assert!(
+            log_content.contains("ralph:in-progress"),
+            "label log should show ralph:in-progress swap, got: {log_content}"
+        );
+
+        // Verify staged amendments were drained.
+        assert!(
+            !has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should have been drained during dispatch"
         );
     })
 }

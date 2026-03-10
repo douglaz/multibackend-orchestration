@@ -2730,19 +2730,63 @@ async fn pr_review_phase(
             continue;
         }
 
-        // Resume projects labeled ralph:completed, or ralph:ready only when a
-        // resume-pending marker exists (restart-drift: label was swapped to
-        // in-progress but daemon crashed before dispatch, then startup
-        // reconciliation converted in-progress → ready).
+        // Resume projects labeled ralph:completed, or ralph:ready when a
+        // resume-pending marker OR staged amendments exist.  The marker case
+        // covers restart-drift (label was swapped to in-progress but daemon
+        // crashed before dispatch, then startup reconciliation converted
+        // in-progress → ready).  The staged-amendments case covers comments
+        // staged for a ralph:ready issue that never had a marker set yet.
+        //
+        // Recovery: when a resume-pending marker exists but NO lifecycle label
+        // is present, a prior swap removed the label and both forward-add and
+        // rollback-add failed, stranding the issue.  Re-add ralph:ready so the
+        // normal swap path can proceed.
+        let has_marker = super::pr_review::has_resume_pending_marker(
+            &config.workspace_root,
+            &candidate.task_id,
+        );
+        let has_staged = super::pr_review::has_staged_amendments(
+            &config.workspace_root,
+            &candidate.task_id,
+        );
+        let no_lifecycle = lifecycle.is_empty();
+
+        let mut labels = labels;
         let from_label = if labels.iter().any(|l| l == "ralph:completed") {
             "ralph:completed"
         } else if labels.iter().any(|l| l == "ralph:ready")
-            && super::pr_review::has_resume_pending_marker(
-                &config.workspace_root,
-                &candidate.task_id,
-            )
+            && (has_marker || has_staged)
         {
             "ralph:ready"
+        } else if no_lifecycle && has_marker {
+            // Stranded issue: marker present but no lifecycle label.
+            // Re-add ralph:ready so the swap path can proceed.
+            match github::add_label_with_retry(
+                &config.owner,
+                &config.repo,
+                candidate.issue_number,
+                "ralph:ready",
+            )
+            .await
+            {
+                Ok(()) => {
+                    eprintln!(
+                        "pr-review: recovered stranded issue #{} \
+                         (no lifecycle label + marker present); re-added ralph:ready",
+                        candidate.issue_number
+                    );
+                    labels.push("ralph:ready".to_string());
+                    "ralph:ready"
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to recover stranded issue #{} \
+                         (no lifecycle label + marker): {err}",
+                        candidate.issue_number
+                    );
+                    continue;
+                }
+            }
         } else {
             continue;
         };
@@ -2754,7 +2798,9 @@ async fn pr_review_phase(
 
         // Set resume-pending marker before label swap so that restart-drift
         // (completed → in-progress → [crash] → ready) can be detected.
-        if from_label == "ralph:completed" {
+        // Also set for ready+staged (no prior marker) so the same safety
+        // property holds during the swap.
+        if !has_marker {
             if let Err(err) = super::pr_review::set_resume_pending_marker(
                 &config.workspace_root,
                 &candidate.task_id,
@@ -2783,7 +2829,7 @@ async fn pr_review_phase(
             );
             // Label swap failed — no in-flight resume actually started.
             // Only clear the marker when:
-            // 1. It was created in this cycle (from_label == "ralph:completed"), AND
+            // 1. It was created in this cycle (!has_marker at entry), AND
             // 2. The original label was confirmed restored (rollback succeeded or
             //    remove never happened).  If rollback failed, the issue may be
             //    missing its lifecycle label and the marker must persist so that
@@ -2791,7 +2837,7 @@ async fn pr_review_phase(
             let label_restored = swap_err
                 .from_label_restored
                 .unwrap_or(true); // None means remove failed, label still present
-            if from_label == "ralph:completed" && label_restored {
+            if !has_marker && label_restored {
                 super::pr_review::clear_resume_pending_marker(
                     &config.workspace_root,
                     &candidate.task_id,
@@ -2845,10 +2891,10 @@ async fn pr_review_phase(
                 } else {
                     // Rollback succeeded — issue is back to its original label
                     // and no in-flight resume is active.  Only clear the marker
-                    // when it was created in this cycle (from ralph:completed).
-                    // For ralph:ready recovery the marker must persist so
+                    // when it was created in this cycle (!has_marker at entry).
+                    // For pre-existing markers the marker must persist so
                     // retries remain possible.
-                    if from_label == "ralph:completed" {
+                    if !has_marker {
                         super::pr_review::clear_resume_pending_marker(
                             &config.workspace_root,
                             &candidate.task_id,
