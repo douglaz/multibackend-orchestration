@@ -90,6 +90,8 @@ pub struct WorkspaceConfig {
     /// Maximum backend timeout retries per invocation (default: 3, max: 10).
     #[serde(default)]
     pub daemon_max_backend_retries: Option<u8>,
+    #[serde(default)]
+    pub daemon_pr_review_whitelist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -536,6 +538,7 @@ impl Default for WorkspaceConfig {
             daemon_prd_backend_timeout_secs: default_daemon_prd_backend_timeout_secs(),
             daemon_prd_shutdown_timeout_secs: default_daemon_prd_shutdown_timeout_secs(),
             daemon_max_backend_retries: None,
+            daemon_pr_review_whitelist: Vec::new(),
         }
     }
 }

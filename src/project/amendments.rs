@@ -78,6 +78,7 @@ pub enum AmendmentSource {
     Cli,
     FinalReview,
     File,
+    PrReview,
 }
 
 impl AmendmentSource {
@@ -86,6 +87,7 @@ impl AmendmentSource {
             Self::Cli => "cli",
             Self::FinalReview => "final-review",
             Self::File => "file",
+            Self::PrReview => "pr-review",
         }
     }
 }

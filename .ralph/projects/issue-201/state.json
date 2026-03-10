@@ -1,0 +1,23 @@
+{
+  "project_id": "issue-201",
+  "project_name": "Implement an automated PR review feedback loop that monitors",
+  "created_at": "2026-03-10T02:58:21.304890359Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "b02614e66bf05a717a1783a79e5517f0ec9f9a8a3568969d21f44b24f77aac4d",
+  "prompt_hash_at_loop_start": "b02614e66bf05a717a1783a79e5517f0ec9f9a8a3568969d21f44b24f77aac4d",
+  "prompt_review_completed": false,
+  "parent_project": null,
+  "current_loop": 15,
+  "current_phase": "reviewing",
+  "quick_dev_phase": "codex_review",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [],
+  "completion_attempts": [],
+  "session_store": {
+    "records": []
+  },
+  "pr_url": null,
+  "quick_dev_review_iteration": 0,
+  "quick_dev_final_review_attempts": 0
+}

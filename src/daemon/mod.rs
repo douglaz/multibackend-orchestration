@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod github;
 pub mod interactive_prd;
+pub mod pr_review;
 pub mod process;
 pub mod rebase_agent;
 pub mod refine;

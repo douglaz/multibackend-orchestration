@@ -429,6 +429,7 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         git_bin: "git".to_owned(),
         gh_bin: "gh".to_owned(),
         max_backend_retries: None,
+        pr_review_whitelist: vec![],
     }
 }
 

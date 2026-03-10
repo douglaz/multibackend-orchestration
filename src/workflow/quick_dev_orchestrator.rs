@@ -2280,6 +2280,7 @@ mod tests {
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
                 max_backend_retries: None,
+                pr_review_whitelist: vec![],
             },
             amendments: EffectiveAmendmentsConfig {
                 unify_final_review: false,

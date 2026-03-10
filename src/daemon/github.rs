@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::RalphError;
 use crate::Result;
@@ -2216,6 +2216,328 @@ fn parse_authenticated_login(raw: &str) -> Result<String> {
     Ok(login.to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// PR review comment fetching
+// ---------------------------------------------------------------------------
+
+/// Source endpoint for dedup key namespacing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentEndpoint {
+    PullComment,
+    IssueComment,
+    Review,
+}
+
+impl CommentEndpoint {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PullComment => "pull_comment",
+            Self::IssueComment => "issue_comment",
+            Self::Review => "review",
+        }
+    }
+}
+
+impl std::fmt::Display for CommentEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single review comment from any of the three GitHub PR comment endpoints.
+#[derive(Debug, Clone)]
+pub struct PrReviewComment {
+    pub id: u64,
+    pub endpoint: CommentEndpoint,
+    pub author: String,
+    pub body: String,
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub created_at: String,
+}
+
+impl PrReviewComment {
+    /// Composite dedup key: `"{endpoint}:{id}"`.
+    pub fn dedup_key(&self) -> String {
+        format!("{}:{}", self.endpoint.as_str(), self.id)
+    }
+}
+
+/// Raw JSON shape for `/pulls/{n}/comments` (inline review comments).
+#[derive(Debug, Deserialize)]
+struct RawPullComment {
+    id: u64,
+    user: RawUser,
+    body: Option<String>,
+    path: Option<String>,
+    line: Option<u32>,
+    created_at: String,
+}
+
+/// Raw JSON shape for `/issues/{n}/comments` (top-level PR comments).
+#[derive(Debug, Deserialize)]
+struct RawIssueComment {
+    id: u64,
+    user: RawUser,
+    body: Option<String>,
+    created_at: String,
+}
+
+/// Raw JSON shape for `/pulls/{n}/reviews` (review summaries).
+#[derive(Debug, Deserialize)]
+struct RawReview {
+    id: u64,
+    user: RawUser,
+    body: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    state: Option<String>,
+    submitted_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUser {
+    login: String,
+}
+
+/// Fetch PR review comments from all three GitHub endpoints.
+///
+/// Returns comments from:
+/// 1. Inline review comments (`/pulls/{n}/comments`)
+/// 2. Top-level PR comments (`/issues/{n}/comments`)
+/// 3. Review summary comments (`/pulls/{n}/reviews`) — only those with non-empty body
+pub async fn fetch_pr_review_comments(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    gh_bin: &str,
+) -> Result<Vec<PrReviewComment>> {
+    let mut comments = Vec::new();
+
+    // 1. Inline review comments
+    match fetch_endpoint_json(
+        gh_bin,
+        &format!("repos/{owner}/{repo}/pulls/{pr_number}/comments"),
+    )
+    .await
+    {
+        Ok(raw) => {
+            let parsed: Vec<RawPullComment> = serde_json::from_str(&raw).unwrap_or_default();
+            for c in parsed {
+                comments.push(PrReviewComment {
+                    id: c.id,
+                    endpoint: CommentEndpoint::PullComment,
+                    author: c.user.login,
+                    body: c.body.unwrap_or_default(),
+                    path: c.path,
+                    line: c.line,
+                    created_at: c.created_at,
+                });
+            }
+        }
+        Err(err) => {
+            eprintln!("warning: failed to fetch inline review comments for PR #{pr_number}: {err}");
+        }
+    }
+
+    // 2. Top-level PR comments (issue comments endpoint)
+    match fetch_endpoint_json(
+        gh_bin,
+        &format!("repos/{owner}/{repo}/issues/{pr_number}/comments"),
+    )
+    .await
+    {
+        Ok(raw) => {
+            let parsed: Vec<RawIssueComment> = serde_json::from_str(&raw).unwrap_or_default();
+            for c in parsed {
+                comments.push(PrReviewComment {
+                    id: c.id,
+                    endpoint: CommentEndpoint::IssueComment,
+                    author: c.user.login,
+                    body: c.body.unwrap_or_default(),
+                    path: None,
+                    line: None,
+                    created_at: c.created_at,
+                });
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: failed to fetch top-level PR comments for PR #{pr_number}: {err}"
+            );
+        }
+    }
+
+    // 3. Review summaries (only include those with non-empty body)
+    match fetch_endpoint_json(
+        gh_bin,
+        &format!("repos/{owner}/{repo}/pulls/{pr_number}/reviews"),
+    )
+    .await
+    {
+        Ok(raw) => {
+            let parsed: Vec<RawReview> = serde_json::from_str(&raw).unwrap_or_default();
+            for r in parsed {
+                let body = r.body.unwrap_or_default();
+                if body.trim().is_empty() {
+                    continue;
+                }
+                comments.push(PrReviewComment {
+                    id: r.id,
+                    endpoint: CommentEndpoint::Review,
+                    author: r.user.login,
+                    body,
+                    path: None,
+                    line: None,
+                    created_at: r.submitted_at.unwrap_or_default(),
+                });
+            }
+        }
+        Err(err) => {
+            eprintln!("warning: failed to fetch review summaries for PR #{pr_number}: {err}");
+        }
+    }
+
+    Ok(comments)
+}
+
+/// Check whether a PR is open via the GitHub API.
+pub async fn is_pr_open(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    gh_bin: &str,
+) -> Result<bool> {
+    let output = Command::new(gh_bin)
+        .args([
+            "api",
+            &format!("repos/{owner}/{repo}/pulls/{pr_number}"),
+            "--jq",
+            ".state",
+        ])
+        .output()
+        .await
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to check PR #{pr_number} state: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh api failed checking PR #{pr_number} state: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(state == "open")
+}
+
+/// Fetch a paginated JSON array from a GitHub API endpoint.
+async fn fetch_endpoint_json(gh_bin: &str, endpoint: &str) -> Result<String> {
+    let output = Command::new(gh_bin)
+        .args(["api", endpoint, "--paginate"])
+        .output()
+        .await
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to call gh api {endpoint}: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh api {endpoint} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    // `--paginate` concatenates JSON arrays, producing `[...][...]...` when
+    // multiple pages exist. Merge them into a single array.
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(merge_paginated_json_arrays(&raw))
+}
+
+/// Merge adjacent JSON arrays (as produced by `gh api --paginate`) into one.
+///
+/// Input: `[{"a":1}][{"b":2}]` → Output: `[{"a":1},{"b":2}]`
+/// Single array input is returned unchanged.
+fn merge_paginated_json_arrays(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "[]".to_string();
+    }
+
+    // Fast path: single array (most common case).
+    // Count top-level `[` - if only one, it's a single array.
+    let mut depth = 0i32;
+    let mut top_level_arrays = 0u32;
+    for ch in trimmed.chars() {
+        match ch {
+            '[' => {
+                if depth == 0 {
+                    top_level_arrays += 1;
+                }
+                depth += 1;
+            }
+            ']' => {
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    if top_level_arrays <= 1 {
+        return trimmed.to_string();
+    }
+
+    // Multi-page: parse each array and merge.
+    let mut merged = Vec::new();
+    let mut remaining = trimmed;
+    while !remaining.is_empty() {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        match serde_json::from_str::<serde_json::Value>(remaining) {
+            Ok(val) => {
+                if let serde_json::Value::Array(arr) = val {
+                    merged.extend(arr);
+                }
+                // This consumed the entire remaining string as one value.
+                break;
+            }
+            Err(_) => {
+                // Try to find the end of the first JSON array.
+                let mut d = 0i32;
+                let mut end = 0;
+                for (i, ch) in remaining.char_indices() {
+                    match ch {
+                        '[' => d += 1,
+                        ']' => {
+                            d -= 1;
+                            if d == 0 {
+                                end = i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if end == 0 {
+                    break;
+                }
+                if let Ok(serde_json::Value::Array(arr)) =
+                    serde_json::from_str::<serde_json::Value>(&remaining[..end])
+                {
+                    merged.extend(arr);
+                }
+                remaining = &remaining[end..];
+            }
+        }
+    }
+
+    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -2959,5 +3281,120 @@ exit 0
     fn read_attempts(path: &Path) -> u32 {
         let raw = fs::read_to_string(path).expect("read attempts file");
         raw.trim().parse::<u32>().expect("parse attempts")
+    }
+
+    // --- PR review comment tests ---
+
+    #[test]
+    fn parse_pull_comments_json() {
+        let json = r#"[
+            {
+                "id": 100,
+                "user": {"login": "alice"},
+                "body": "fix this line",
+                "path": "src/main.rs",
+                "line": 42,
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        ]"#;
+        let parsed: Vec<super::RawPullComment> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, 100);
+        assert_eq!(parsed[0].user.login, "alice");
+        assert_eq!(parsed[0].body, Some("fix this line".to_string()));
+        assert_eq!(parsed[0].path, Some("src/main.rs".to_string()));
+        assert_eq!(parsed[0].line, Some(42));
+    }
+
+    #[test]
+    fn parse_issue_comments_json() {
+        let json = r#"[
+            {
+                "id": 200,
+                "user": {"login": "bob"},
+                "body": "please add tests",
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        ]"#;
+        let parsed: Vec<super::RawIssueComment> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, 200);
+        assert_eq!(parsed[0].user.login, "bob");
+    }
+
+    #[test]
+    fn parse_reviews_json_filters_empty_body() {
+        let json = r#"[
+            {
+                "id": 300,
+                "user": {"login": "carol"},
+                "body": "needs refactoring",
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2024-01-01T00:00:00Z"
+            },
+            {
+                "id": 301,
+                "user": {"login": "dave"},
+                "body": "",
+                "state": "APPROVED",
+                "submitted_at": "2024-01-01T00:00:00Z"
+            },
+            {
+                "id": 302,
+                "user": {"login": "eve"},
+                "body": null,
+                "state": "COMMENTED",
+                "submitted_at": "2024-01-01T00:00:00Z"
+            }
+        ]"#;
+        let parsed: Vec<super::RawReview> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 3);
+
+        // Only non-empty bodies should pass the filter
+        let non_empty: Vec<_> = parsed
+            .iter()
+            .filter(|r| {
+                r.body
+                    .as_ref()
+                    .map(|b| !b.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(non_empty.len(), 1);
+        assert_eq!(non_empty[0].user.login, "carol");
+    }
+
+    #[test]
+    fn comment_endpoint_serialization_roundtrip() {
+        for endpoint in [
+            super::CommentEndpoint::PullComment,
+            super::CommentEndpoint::IssueComment,
+            super::CommentEndpoint::Review,
+        ] {
+            let json = serde_json::to_string(&endpoint).unwrap();
+            let parsed: super::CommentEndpoint = serde_json::from_str(&json).unwrap();
+            assert_eq!(endpoint, parsed);
+        }
+    }
+
+    #[test]
+    fn merge_paginated_json_arrays_single() {
+        let input = r#"[{"a":1},{"b":2}]"#;
+        let result = super::merge_paginated_json_arrays(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn merge_paginated_json_arrays_multi() {
+        let input = r#"[{"a":1}][{"b":2}]"#;
+        let result = super::merge_paginated_json_arrays(input);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn merge_paginated_json_arrays_empty() {
+        let result = super::merge_paginated_json_arrays("");
+        assert_eq!(result, "[]");
     }
 }

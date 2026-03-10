@@ -124,6 +124,7 @@ pub struct EffectiveDaemonConfig {
     pub prd_shutdown_timeout_secs: u64,
     /// Maximum number of backend timeout retries per invocation.
     pub max_backend_retries: Option<u8>,
+    pub pr_review_whitelist: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -522,6 +523,7 @@ pub fn resolve_daemon_config(
         prd_backend_timeout_secs: global.workspace.daemon_prd_backend_timeout_secs,
         prd_shutdown_timeout_secs: global.workspace.daemon_prd_shutdown_timeout_secs,
         max_backend_retries: global.workspace.daemon_max_backend_retries,
+        pr_review_whitelist: global.workspace.daemon_pr_review_whitelist.clone(),
     }
 }
 

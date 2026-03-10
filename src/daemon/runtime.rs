@@ -82,6 +82,8 @@ pub struct DaemonRuntimeConfig {
     /// Maximum number of backend timeout retries per invocation.
     /// Threaded through to task params so orchestrators use a consistent value.
     pub max_backend_retries: Option<u8>,
+    /// GitHub usernames whose PR review comments trigger amendments.
+    pub pr_review_whitelist: Vec<String>,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -840,6 +842,13 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children, &repo_root_lock).await;
 
+        // PR review polling phase: detect review comments and resume completed projects
+        if !config.pr_review_whitelist.is_empty() {
+            if let Err(err) = pr_review_phase(config, &mut children, &repo_root_lock).await {
+                eprintln!("warning: PR review polling failed: {err}");
+            }
+        }
+
         // Interactive PRD phase: in single-iteration mode, run exactly one
         // inline tick (no background task). In continuous mode, PRD runs as
         // a background task spawned above.
@@ -1432,6 +1441,35 @@ async fn dispatch_task(
         let pid = project_id.clone();
         spawn_blocking_op(move || Ok(should_resume_issue_project(&wt, &pid))).await?
     };
+
+    // Drain any staged PR review amendments into the project's amendment queue,
+    // and reset project state so the orchestrator doesn't short-circuit on Completed.
+    {
+        let ws = config.workspace_root.clone();
+        let tid = task_id.clone();
+        let pid = project_id.clone();
+        let wt = wt_path.clone();
+        let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
+        let drained = spawn_blocking_op(move || {
+            let project_dir = wt.join(".ralph").join("projects").join(&pid);
+            if project_dir.exists() {
+                let count =
+                    super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
+                if count > 0 {
+                    super::pr_review::reset_project_state_for_resume(&project_dir, is_quick)?;
+                }
+                Ok(count)
+            } else {
+                Ok(0)
+            }
+        })
+        .await?;
+        if drained > 0 {
+            eprintln!(
+                "dispatch: drained {drained} staged PR review amendment(s) for {task_id}"
+            );
+        }
+    }
 
     if resume_existing_project {
         eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
@@ -2417,6 +2455,122 @@ enum RebaseOutcome {
         error: String,
         is_lease: bool,
     },
+}
+
+/// PR review polling phase: detect review comments from whitelisted users on
+/// open PRs, stage amendments, and re-dispatch completed projects.
+async fn pr_review_phase(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, TaskHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+) -> Result<()> {
+    let poll_results =
+        super::pr_review::poll_pr_reviews(config, children).await?;
+
+    if poll_results.is_empty() {
+        return Ok(());
+    }
+
+    // For each task that received new amendments, check if it needs re-dispatch.
+    for result in &poll_results {
+        // Skip if already running.
+        if children.contains_key(&result.issue_number) {
+            continue;
+        }
+
+        // Check capacity.
+        let slots = config
+            .max_concurrent
+            .saturating_sub(children.len() as u32);
+        if slots == 0 {
+            eprintln!(
+                "PR review amendments pending for {} but no capacity slots available; deferring",
+                result.task_id
+            );
+            continue;
+        }
+
+        // Fetch issue labels to determine current state.
+        let labels = match github::fetch_issue_labels_with_gh_bin(
+            &config.gh_bin,
+            &config.owner,
+            &config.repo,
+            result.issue_number,
+        )
+        .await
+        {
+            Ok(labels) => labels,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to fetch labels for issue #{} ({}): {err}",
+                    result.issue_number, result.task_id
+                );
+                continue;
+            }
+        };
+
+        // Only resume completed projects.
+        if !labels.iter().any(|l| l == "ralph:completed") {
+            continue;
+        }
+
+        eprintln!(
+            "pr-review: resuming completed task {} with {} new amendment(s)",
+            result.task_id, result.new_amendment_count
+        );
+
+        // Swap label: ralph:completed -> ralph:in-progress
+        if let Err(err) = github::swap_lifecycle_label(
+            &config.owner,
+            &config.repo,
+            result.issue_number,
+            "ralph:completed",
+            "ralph:in-progress",
+        )
+        .await
+        {
+            eprintln!(
+                "warning: failed to swap lifecycle label for {}: {err}",
+                result.task_id
+            );
+            continue;
+        }
+
+        // Compose a minimal raw_idea for dispatch (it won't be used for resumed projects
+        // since should_resume_issue_project will return true).
+        let raw_idea = format!("PR review amendments for issue #{}", result.issue_number);
+
+        // Dispatch the task. State reset and amendment drain happen inside dispatch_task
+        // after worktree creation and before task spawn.
+        match dispatch_task(config, result.issue_number, &raw_idea, &labels, repo_root_lock)
+            .await
+        {
+            Ok(handle) => {
+                children.insert(result.issue_number, handle);
+                eprintln!(
+                    "pr-review: dispatched task {} for PR review amendments",
+                    result.task_id
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to dispatch task {} for PR review amendments: {err}",
+                    result.task_id
+                );
+                // Revert label swap on dispatch failure.
+                let _ = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    result.issue_number,
+                    "ralph:in-progress",
+                    "ralph:completed",
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn auto_rebase_phase(
@@ -4159,6 +4313,7 @@ mod tests {
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
+            pr_review_whitelist: vec![],
         };
 
         let cancel = CancellationToken::new();
@@ -4249,6 +4404,7 @@ mod tests {
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
+            pr_review_whitelist: vec![],
         };
 
         // Counter that the task increments; if it continues running after
