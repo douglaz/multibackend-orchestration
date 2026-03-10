@@ -57,6 +57,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::crash_after_dispatch_recovers_via_marker",
             func: crash_after_dispatch_recovers_via_marker,
         },
+        ConformanceTest {
+            name: "pr_review::partial_swap_failure_preserves_marker",
+            func: partial_swap_failure_preserves_marker,
+        },
     ]
 }
 
@@ -257,6 +261,42 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
         assert!(
             stderr.contains("pr-review: resuming ralph:completed task"),
             "stderr should log resume attempt"
+        );
+
+        // Verify project state was reset inside the worktree.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        assert!(
+            worktrees_dir.exists(),
+            "worktrees directory must exist after dispatch"
+        );
+
+        let mut found_state = false;
+        for entry in fs::read_dir(&worktrees_dir)
+            .unwrap_or_else(|_| panic!("read worktrees dir"))
+            .filter_map(|e| e.ok())
+        {
+            let state_path = entry
+                .path()
+                .join(".ralph")
+                .join("projects")
+                .join("issue-42")
+                .join("state.json");
+            if state_path.exists() {
+                let content =
+                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let loaded: serde_json::Value =
+                    serde_json::from_str(&content).expect("parse state");
+                assert_eq!(
+                    loaded["status"], "in_progress",
+                    "status should be reset to in_progress for regular project"
+                );
+                found_state = true;
+                break;
+            }
+        }
+        assert!(
+            found_state,
+            "state.json must exist in worktree after dispatch and contain reset state"
         );
     })
 }
@@ -1302,6 +1342,132 @@ fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
     })
 }
 
+/// Regression test: when the label swap's add step fails (remove succeeds,
+/// add fails), `swap_lifecycle_label` rolls back by re-adding the original
+/// label.  If rollback succeeds, the resume-pending marker should be cleared.
+/// If rollback fails, the marker must persist for restart recovery.
+fn partial_swap_failure_preserves_marker(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let label_log = dh.temp_dir.path().join("partial_swap_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // Use a custom mock gh that fails on --add-label ralph:in-progress
+        // but succeeds on the rollback --add-label ralph:completed.
+        let gh_path = write_partial_swap_mock_gh(&dh).expect("write partial swap mock gh");
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                    // Tell mock to fail when adding ralph:in-progress
+                    ("MOCK_GH_FAIL_ADD_LABEL", "ralph:in-progress"),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify the swap failure was logged.
+        assert!(
+            stderr.contains("warning: failed to swap lifecycle label"),
+            "stderr should log swap failure, got: {stderr}"
+        );
+
+        // Verify label log shows: remove completed, fail add in-progress,
+        // then rollback add completed.
+        assert!(
+            label_log.exists(),
+            "label log must exist to verify swap operations"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let lines: Vec<&str> = log_content.lines().collect();
+        // At minimum: remove ralph:completed (success), add ralph:in-progress (fail logged),
+        // add ralph:completed (rollback success).
+        let has_remove_completed = lines
+            .iter()
+            .any(|l| l.contains("--remove-label") && l.contains("ralph:completed"));
+        let has_rollback_add = lines
+            .iter()
+            .any(|l| l.contains("--add-label") && l.contains("ralph:completed"));
+        assert!(
+            has_remove_completed,
+            "label log should show remove of ralph:completed, got: {log_content}"
+        );
+        assert!(
+            has_rollback_add,
+            "label log should show rollback re-add of ralph:completed, got: {log_content}"
+        );
+
+        // Resume-pending marker should be cleared because rollback succeeded
+        // (the original ralph:completed label was restored).
+        assert!(
+            !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker should be cleared after swap failure with successful rollback"
+        );
+
+        // Staged amendments must survive (no dispatch occurred).
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved after swap failure"
+        );
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1449,6 +1615,171 @@ case "$1" in
         ;;
       repos/*/pulls/*)
         # PR state check (is_pr_open uses --jq .state)
+        if [ "$has_jq" = "1" ]; then
+          printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
+          exit 0
+        fi
+        printf '{"state":"%s"}' "${MOCK_GH_PR_STATE:-open}"
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled api endpoint: $endpoint" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *) echo "mock gh: unhandled label subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view) printf 'acme/widgets\n'; exit 0 ;;
+      *) echo "mock gh: unhandled repo subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###,
+    )?;
+    let base = script
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    Ok(format!("{base}:{existing}"))
+}
+
+/// Write a mock gh script that simulates a partial label swap failure.
+///
+/// When `MOCK_GH_FAIL_ADD_LABEL` is set, `--add-label` operations matching
+/// that label value will fail (exit 1).  All other label operations succeed.
+/// This allows testing the `swap_lifecycle_label` rollback path where remove
+/// succeeds but add fails, and the rollback re-add of the original label
+/// either succeeds or fails depending on the value.
+fn write_partial_swap_mock_gh(h: &RalphHarness) -> crate::Result<String> {
+    let script = h.write_mock_script(
+        "gh",
+        r###"#!/bin/sh
+# Mock gh for partial swap failure tests.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        # Check if this is an --add-label that should fail.
+        if [ -n "${MOCK_GH_FAIL_ADD_LABEL:-}" ]; then
+          prev=""
+          for arg in "$@"; do
+            if [ "$prev" = "--add-label" ] && [ "$arg" = "$MOCK_GH_FAIL_ADD_LABEL" ]; then
+              echo "simulated add-label failure for $arg" >&2
+              exit 1
+            fi
+            prev="$arg"
+          done
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then want_labels=1; fi
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *) echo "mock gh: unhandled issue subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf ''; exit 0 ;;
+      create) printf 'https://github.com/acme/widgets/pull/1\n'; exit 0 ;;
+      edit) exit 0 ;;
+      *) echo "mock gh: unhandled pr subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    endpoint="$2"
+    has_jq=0
+    for arg in "$@"; do
+      if [ "$arg" = "--jq" ]; then has_jq=1; fi
+    done
+    case "$endpoint" in
+      repos/*/pulls/*/comments)
+        if [ -n "${MOCK_GH_PR_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_PR_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/issues/*/comments)
+        if [ -n "${MOCK_GH_ISSUE_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUE_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*/reviews)
+        if [ -n "${MOCK_GH_REVIEWS:-}" ]; then
+          printf '%s' "$MOCK_GH_REVIEWS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*)
         if [ "$has_jq" = "1" ]; then
           printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
           exit 0

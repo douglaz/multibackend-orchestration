@@ -1427,19 +1427,70 @@ pub async fn normalize_multi_lifecycle_labels(
     Ok(true)
 }
 
+/// Error returned when a lifecycle label swap fails.
+///
+/// Provides context about whether the original label was restored after a
+/// partial failure (remove succeeded but add failed).
+#[derive(Debug)]
+pub struct SwapLabelError {
+    /// The underlying error that caused the swap to fail.
+    pub error: RalphError,
+    /// Whether the original `from_label` was restored after a partial failure.
+    /// - `None`: the remove step failed (original label still present, no rollback needed).
+    /// - `Some(true)`: the add step failed but the original label was successfully re-added.
+    /// - `Some(false)`: the add step failed and the rollback also failed (label may be missing).
+    pub from_label_restored: Option<bool>,
+}
+
+impl std::fmt::Display for SwapLabelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl From<SwapLabelError> for RalphError {
+    fn from(e: SwapLabelError) -> Self {
+        e.error
+    }
+}
+
 /// Swap lifecycle labels atomically with retry-on-conflict and retry-on-transient.
 ///
 /// Removes `from_label` and adds `to_label`. Both operations are retried
 /// individually with bounded attempts and exponential backoff.
+///
+/// If the add step fails after a successful remove, a best-effort rollback
+/// re-adds `from_label`. The returned [`SwapLabelError`] indicates whether
+/// the rollback succeeded via `from_label_restored`.
 pub async fn swap_lifecycle_label(
     owner: &str,
     repo: &str,
     issue_number: u32,
     from_label: &str,
     to_label: &str,
-) -> Result<()> {
-    remove_label_with_retry(owner, repo, issue_number, from_label).await?;
-    add_label_with_retry(owner, repo, issue_number, to_label).await?;
+) -> std::result::Result<(), SwapLabelError> {
+    if let Err(error) = remove_label_with_retry(owner, repo, issue_number, from_label).await {
+        return Err(SwapLabelError {
+            error,
+            from_label_restored: None, // remove failed, original label still present
+        });
+    }
+    if let Err(error) = add_label_with_retry(owner, repo, issue_number, to_label).await {
+        // Best-effort rollback: try to re-add the original label.
+        let restored = add_label_with_retry(owner, repo, issue_number, from_label)
+            .await
+            .is_ok();
+        if !restored {
+            eprintln!(
+                "warning: swap_lifecycle_label rollback failed — \
+                 issue {owner}/{repo}#{issue_number} may be missing lifecycle label {from_label}"
+            );
+        }
+        return Err(SwapLabelError {
+            error,
+            from_label_restored: Some(restored),
+        });
+    }
     Ok(())
 }
 

@@ -2699,7 +2699,7 @@ async fn pr_review_phase(
         }
 
         // Swap label: ralph:{completed|ready} -> ralph:in-progress
-        if let Err(err) = github::swap_lifecycle_label(
+        if let Err(swap_err) = github::swap_lifecycle_label(
             &config.owner,
             &config.repo,
             candidate.issue_number,
@@ -2709,15 +2709,20 @@ async fn pr_review_phase(
         .await
         {
             eprintln!(
-                "warning: failed to swap lifecycle label for {}: {err}",
+                "warning: failed to swap lifecycle label for {}: {swap_err}",
                 candidate.task_id
             );
             // Label swap failed — no in-flight resume actually started.
-            // Only clear the marker when it was created in this cycle
-            // (from_label == "ralph:completed").  For ralph:ready recovery
-            // the marker is pre-existing and must persist so retries remain
-            // possible on subsequent cycles / restarts.
-            if from_label == "ralph:completed" {
+            // Only clear the marker when:
+            // 1. It was created in this cycle (from_label == "ralph:completed"), AND
+            // 2. The original label was confirmed restored (rollback succeeded or
+            //    remove never happened).  If rollback failed, the issue may be
+            //    missing its lifecycle label and the marker must persist so that
+            //    restart recovery can detect the stranded state.
+            let label_restored = swap_err
+                .from_label_restored
+                .unwrap_or(true); // None means remove failed, label still present
+            if from_label == "ralph:completed" && label_restored {
                 super::pr_review::clear_resume_pending_marker(
                     &config.workspace_root,
                     &candidate.task_id,
