@@ -39,6 +39,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::quick_dev_resume_clears_stale_counters",
             func: quick_dev_resume_clears_stale_counters,
         },
+        ConformanceTest {
+            name: "pr_review::restart_drift_ready_drains_staged",
+            func: restart_drift_ready_drains_staged,
+        },
     ]
 }
 
@@ -237,7 +241,7 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
 
         // Verify dispatch was attempted.
         assert!(
-            stderr.contains("pr-review: resuming completed task"),
+            stderr.contains("pr-review: resuming ralph:completed task"),
             "stderr should log resume attempt"
         );
     })
@@ -504,7 +508,7 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
 
         // Verify dispatch was attempted.
         assert!(
-            stderr.contains("pr-review: resuming completed task"),
+            stderr.contains("pr-review: resuming ralph:completed task"),
             "stderr should log resume attempt for quick-dev project"
         );
 
@@ -731,7 +735,7 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
 
         // Verify dispatch was attempted.
         assert!(
-            stderr.contains("pr-review: resuming completed task"),
+            stderr.contains("pr-review: resuming ralph:completed task"),
             "stderr should log resume attempt for quick-dev project with stale counters"
         );
 
@@ -782,6 +786,121 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
         assert!(
             stderr.contains("pr-review: dispatched task"),
             "dispatch should have been attempted even if worktree is hard to locate"
+        );
+    })
+}
+
+/// Simulate restart drift: a completed project had its label swapped to
+/// in-progress during a previous PR-review resume, but the daemon crashed
+/// before dispatch.  Startup reconciliation converts in-progress → ready.
+/// Assert that pr_review_phase picks up the ralph:ready issue (with staged
+/// amendments) and drains them on the next tick.
+fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment (simulating what poll_pr_reviews did before crash).
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Also persist the dedup key so the comment won't be re-enqueued
+        // (simulating that dedup state was saved before the crash).
+        let mut dedup_state = PrReviewState::default();
+        dedup_state
+            .processed_keys
+            .insert("issue_comment:1".to_string());
+        dedup_state
+            .save(&ws_root, "acme-widgets-42")
+            .expect("save dedup state");
+
+        let label_log = dh.temp_dir.path().join("drift_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has ralph:ready label — simulating post-restart reconciliation
+        // (the original ralph:completed was swapped to ralph:in-progress, then
+        // startup reconciliation converted it to ralph:ready).
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify pr_review_phase picked up the ralph:ready task.
+        assert!(
+            stderr.contains("pr-review: resuming ralph:ready task"),
+            "stderr should log resume of ralph:ready task, got: {stderr}"
+        );
+
+        // Verify label swap occurred (ready → in-progress).
+        assert!(
+            label_log.exists(),
+            "label log should exist after label swap"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:in-progress"),
+            "label log should contain ralph:in-progress swap, got: {log_content}"
+        );
+
+        // Verify staged amendments were drained.
+        assert!(
+            !has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should have been drained during dispatch"
         );
     })
 }

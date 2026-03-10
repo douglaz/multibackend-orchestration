@@ -1376,7 +1376,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
-    origin: DispatchOrigin,
+    _origin: DispatchOrigin,
 ) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
@@ -1455,15 +1455,19 @@ async fn dispatch_task(
 
     // Drain any staged PR review amendments into the project's amendment queue,
     // and reset project state so the orchestrator doesn't short-circuit on Completed.
-    // Only runs for PR-review resume dispatches to avoid accidentally touching
-    // staged amendments during normal claim flow.
-    let drained_count = if origin == DispatchOrigin::PrReviewResume {
+    // Runs for any dispatch origin whenever staged files exist — this handles
+    // the restart-drift scenario where startup reconciliation converts
+    // in-progress → ready and poll_and_claim dispatches with DispatchOrigin::Claim.
+    let drained_count = {
         let ws = config.workspace_root.clone();
         let tid = task_id.clone();
         let pid = project_id.clone();
         let wt = wt_path.clone();
         let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
         let drained = spawn_blocking_op(move || {
+            if !super::pr_review::has_staged_amendments(&ws, &tid) {
+                return Ok(0);
+            }
             let project_dir = wt.join(".ralph").join("projects").join(&pid);
             if project_dir.exists() {
                 let count =
@@ -1483,8 +1487,6 @@ async fn dispatch_task(
             );
         }
         drained
-    } else {
-        0
     };
 
     if resume_existing_project {
@@ -2630,22 +2632,28 @@ async fn pr_review_phase(
             }
         };
 
-        // Only resume completed projects.
-        if !labels.iter().any(|l| l == "ralph:completed") {
+        // Resume projects labeled ralph:completed or ralph:ready (the latter
+        // handles the restart-drift case where startup reconciliation converted
+        // in-progress → ready before PR-review resume could complete).
+        let from_label = if labels.iter().any(|l| l == "ralph:completed") {
+            "ralph:completed"
+        } else if labels.iter().any(|l| l == "ralph:ready") {
+            "ralph:ready"
+        } else {
             continue;
-        }
+        };
 
         eprintln!(
-            "pr-review: resuming completed task {} with staged amendment(s)",
+            "pr-review: resuming {from_label} task {} with staged amendment(s)",
             candidate.task_id
         );
 
-        // Swap label: ralph:completed -> ralph:in-progress
+        // Swap label: ralph:{completed|ready} -> ralph:in-progress
         if let Err(err) = github::swap_lifecycle_label(
             &config.owner,
             &config.repo,
             candidate.issue_number,
-            "ralph:completed",
+            from_label,
             "ralph:in-progress",
         )
         .await
@@ -2684,7 +2692,7 @@ async fn pr_review_phase(
                     &config.repo,
                     candidate.issue_number,
                     "ralph:in-progress",
-                    "ralph:completed",
+                    from_label,
                 )
                 .await;
             }
