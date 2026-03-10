@@ -1,6 +1,7 @@
 use super::*;
 
 use std::fs;
+use std::sync::Mutex;
 
 use crate::daemon::github;
 use crate::daemon::github::IssueComment;
@@ -14,6 +15,11 @@ use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
+
+/// Serializes access to process-global env vars in tests that inject
+/// `RALPH_TEST_INJECT_PANIC`. The validate runner executes tests in parallel
+/// via `thread::scope`, so env mutation must be guarded.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -4313,9 +4319,7 @@ exit 0
         };
 
         // Inject a real panic for issue #110
-        let _guard = crate::validate::process_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };

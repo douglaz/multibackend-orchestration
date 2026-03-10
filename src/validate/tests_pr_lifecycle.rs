@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::*;
 
@@ -118,9 +118,7 @@ fn early_prompt_push_fails_on_branch_mismatch(h: &RalphHarness) -> TestResult {
 
 fn draft_pr_marked_ready_transition(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = crate::validate::process_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock().lock().expect("env lock");
         let repo = &h.repo_root;
 
         git(repo, &["checkout", "-b", "ralph/issue-ready"]);
@@ -180,9 +178,7 @@ fn draft_pr_marked_ready_transition(h: &RalphHarness) -> TestResult {
 
 fn no_diff_draft_pr_closed_transition(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = crate::validate::process_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock().lock().expect("env lock");
         let repo = &h.repo_root;
         git(repo, &["checkout", "master"]);
 
@@ -431,6 +427,11 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         max_backend_retries: None,
         pr_review_whitelist: vec![],
     }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct PathEnvGuard {
