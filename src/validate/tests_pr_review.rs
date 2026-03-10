@@ -58,8 +58,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: crash_after_dispatch_recovers_via_marker,
         },
         ConformanceTest {
-            name: "pr_review::partial_swap_failure_preserves_marker",
-            func: partial_swap_failure_preserves_marker,
+            name: "pr_review::partial_swap_failure_clears_marker_on_rollback",
+            func: partial_swap_failure_clears_marker_on_rollback,
         },
     ]
 }
@@ -152,12 +152,39 @@ fn whitelist_filters_comments(h: &RalphHarness) -> TestResult {
             "expected 3 staged amendments (alice x2, bob x1), got {count}"
         );
 
-        // Verify dedup state persisted.
+        // Verify dedup state has exact expected keys (whitelisted comments only).
         let state = PrReviewState::load(&ws_root, "acme-widgets-42").expect("load dedup state");
         assert_eq!(
             state.processed_keys.len(),
             3,
             "dedup state should have 3 keys"
+        );
+        // Exact included keys: alice inline, bob top-level, alice review summary.
+        assert!(
+            state.processed_keys.contains("pull_comment:1"),
+            "alice's inline comment (pull_comment:1) should be in dedup keys: {:?}",
+            state.processed_keys
+        );
+        assert!(
+            state.processed_keys.contains("issue_comment:10"),
+            "bob's top-level comment (issue_comment:10) should be in dedup keys: {:?}",
+            state.processed_keys
+        );
+        assert!(
+            state.processed_keys.contains("review:20"),
+            "alice's review summary (review:20) should be in dedup keys: {:?}",
+            state.processed_keys
+        );
+        // Exact excluded keys: charlie (not whitelisted) and ralph-bot (self).
+        assert!(
+            !state.processed_keys.contains("pull_comment:2"),
+            "charlie's comment (pull_comment:2) should NOT be in dedup keys: {:?}",
+            state.processed_keys
+        );
+        assert!(
+            !state.processed_keys.contains("issue_comment:11"),
+            "ralph-bot's comment (issue_comment:11) should NOT be in dedup keys: {:?}",
+            state.processed_keys
         );
     })
 }
@@ -473,6 +500,13 @@ fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
         assert!(
             stderr.contains("no capacity slots available; deferring"),
             "stderr should indicate capacity deferral, got: {stderr}"
+        );
+
+        // Verify at least one task was actually dispatched (proves capacity
+        // constraint caused selective deferral, not total failure).
+        assert!(
+            stderr.contains("dispatched task"),
+            "stderr should show at least one dispatched task, got: {stderr}"
         );
 
         // At least one task should still have staged amendments (the deferred one).
@@ -1344,9 +1378,10 @@ fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
 
 /// Regression test: when the label swap's add step fails (remove succeeds,
 /// add fails), `swap_lifecycle_label` rolls back by re-adding the original
-/// label.  If rollback succeeds, the resume-pending marker should be cleared.
-/// If rollback fails, the marker must persist for restart recovery.
-fn partial_swap_failure_preserves_marker(h: &RalphHarness) -> TestResult {
+/// label.  When rollback succeeds, the resume-pending marker should be cleared
+/// because the issue is back to its original state and no in-flight resume
+/// is active.
+fn partial_swap_failure_clears_marker_on_rollback(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh =
             RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");

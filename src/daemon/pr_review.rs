@@ -132,15 +132,20 @@ pub fn stage_amendment(
     );
     let path = dir.join(&filename);
 
-    // Idempotent: if already staged, validate the existing file is well-formed
-    // JSON.  A crash during a previous write can leave truncated/corrupt data;
-    // in that case we fall through and rewrite atomically.
+    // Idempotent: if already staged, validate the existing file is a valid
+    // `AmendmentRequest` with matching id and source.  A crash during a
+    // previous write can leave truncated/corrupt data, and valid-but-wrong
+    // JSON (e.g. `{}`) must not be silently accepted — otherwise the dedup
+    // state records the comment as processed while the staged file cannot
+    // be drained as a real amendment.
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
-            if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
-                return Ok(());
+            if let Ok(existing) = serde_json::from_str::<AmendmentRequest>(&content) {
+                if existing.id == amendment.id && existing.source == AmendmentSource::PrReview {
+                    return Ok(());
+                }
             }
-            // Malformed — fall through to rewrite.
+            // Invalid, wrong id/source, or malformed — fall through to rewrite.
         }
         // Unreadable or malformed — fall through to rewrite.
     }
@@ -497,8 +502,23 @@ pub fn discover_tasks_with_prs(workspace_root: &Path, owner: &str, repo: &str) -
         };
 
         let meta: TaskMetadata = match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => continue,
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(m) => m,
+                Err(err) => {
+                    eprintln!(
+                        "warning: corrupt task metadata at {}, skipping: {err}",
+                        path.display()
+                    );
+                    continue;
+                }
+            },
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to read task metadata at {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
         };
 
         let pr_url = match meta.pr_url {
@@ -1036,6 +1056,39 @@ mod tests {
 
         let after = fs::read_to_string(dir.join(&filename)).expect("read after");
         assert_eq!(original, after, "valid existing file should not be overwritten");
+    }
+
+    #[test]
+    fn stage_amendment_rewrites_valid_json_but_invalid_amendment() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+
+        // Write valid JSON that is NOT a valid AmendmentRequest (e.g. `{}`).
+        let dir = staging_dir(ws_root, task_id);
+        fs::create_dir_all(&dir).expect("create staging dir");
+        let filename = format!(
+            "{}.json",
+            crate::project::amendments::sanitize_id(&amendment.id),
+        );
+        fs::write(dir.join(&filename), b"{}").expect("write valid-but-wrong json");
+
+        // stage_amendment should detect invalid payload and rewrite.
+        stage_amendment(ws_root, task_id, &amendment).expect("stage over invalid");
+
+        let content = fs::read_to_string(dir.join(&filename)).expect("read");
+        let loaded: AmendmentRequest = serde_json::from_str(&content).expect("parse");
+        assert_eq!(loaded.id, "PR-42-pull_comment-100");
+        assert_eq!(loaded.source, AmendmentSource::PrReview);
     }
 
     #[test]

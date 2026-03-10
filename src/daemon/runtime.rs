@@ -726,6 +726,9 @@ pub fn load_task_metadata(workspace_root: &Path, task_id: &str) -> TaskMetadata 
 }
 
 /// Persist task metadata to disk (best-effort: logs on failure).
+///
+/// Uses atomic temp-file + rename to prevent crash-interrupted writes from
+/// leaving truncated/corrupt JSON that would silently reset metadata.
 pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetadata) {
     let path = task_metadata_path(workspace_root, task_id);
     if let Some(parent) = path.parent() {
@@ -733,8 +736,13 @@ pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetad
     }
     match serde_json::to_string_pretty(meta) {
         Ok(json) => {
-            if let Err(err) = std::fs::write(&path, json) {
-                eprintln!("warning: failed to persist task metadata for {task_id}: {err}");
+            let tmp_path = path.with_extension("json.tmp");
+            if let Err(err) = std::fs::write(&tmp_path, &json) {
+                eprintln!("warning: failed to write task metadata tmp for {task_id}: {err}");
+                return;
+            }
+            if let Err(err) = std::fs::rename(&tmp_path, &path) {
+                eprintln!("warning: failed to rename task metadata for {task_id}: {err}");
             }
         }
         Err(err) => {
