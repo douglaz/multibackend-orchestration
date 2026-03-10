@@ -2712,12 +2712,17 @@ async fn pr_review_phase(
                 "warning: failed to swap lifecycle label for {}: {err}",
                 candidate.task_id
             );
-            // Label swap failed — no in-flight resume actually started, so
-            // clear the marker to avoid stale-marker re-dispatch loops.
-            super::pr_review::clear_resume_pending_marker(
-                &config.workspace_root,
-                &candidate.task_id,
-            );
+            // Label swap failed — no in-flight resume actually started.
+            // Only clear the marker when it was created in this cycle
+            // (from_label == "ralph:completed").  For ralph:ready recovery
+            // the marker is pre-existing and must persist so retries remain
+            // possible on subsequent cycles / restarts.
+            if from_label == "ralph:completed" {
+                super::pr_review::clear_resume_pending_marker(
+                    &config.workspace_root,
+                    &candidate.task_id,
+                );
+            }
             continue;
         }
 
@@ -2765,12 +2770,16 @@ async fn pr_review_phase(
                     // it to detect the in-flight resume that got stuck.
                 } else {
                     // Rollback succeeded — issue is back to its original label
-                    // and no in-flight resume is active.  Clear the marker to
-                    // prevent stale-marker re-dispatch loops.
-                    super::pr_review::clear_resume_pending_marker(
-                        &config.workspace_root,
-                        &candidate.task_id,
-                    );
+                    // and no in-flight resume is active.  Only clear the marker
+                    // when it was created in this cycle (from ralph:completed).
+                    // For ralph:ready recovery the marker must persist so
+                    // retries remain possible.
+                    if from_label == "ralph:completed" {
+                        super::pr_review::clear_resume_pending_marker(
+                            &config.workspace_root,
+                            &candidate.task_id,
+                        );
+                    }
                 }
             }
         }

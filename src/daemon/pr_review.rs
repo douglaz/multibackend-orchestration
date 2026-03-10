@@ -242,6 +242,9 @@ pub fn purge_staged_amendments(workspace_root: &Path, task_id: &str) {
 }
 
 /// Check if there are any staged amendments for a task.
+///
+/// Only counts regular `.json` files — temp/crash artifacts (`.tmp`) are
+/// ignored so that stale temp files don't trigger no-op resume attempts.
 pub fn has_staged_amendments(workspace_root: &Path, task_id: &str) -> bool {
     let dir = staging_dir(workspace_root, task_id);
     if !dir.exists() {
@@ -249,7 +252,18 @@ pub fn has_staged_amendments(workspace_root: &Path, task_id: &str) -> bool {
     }
     fs::read_dir(&dir)
         .ok()
-        .map(|mut entries| entries.any(|e| e.is_ok()))
+        .map(|mut entries| {
+            entries.any(|e| {
+                e.ok()
+                    .and_then(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .map(|ext| ext == "json")
+                    })
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -1050,6 +1064,32 @@ mod tests {
     fn has_staged_amendments_empty() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(!has_staged_amendments(tmp.path(), "nonexistent"));
+    }
+
+    #[test]
+    fn has_staged_amendments_ignores_tmp_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let task_id = "owner-repo-42";
+        let dir = tmp
+            .path()
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join(task_id);
+        fs::create_dir_all(&dir).expect("create staging dir");
+
+        // Only .tmp crash artifacts — should NOT count as staged work.
+        fs::write(dir.join("PR-42-pull_comment-100.json.tmp"), "partial").expect("write tmp");
+        assert!(
+            !has_staged_amendments(tmp.path(), task_id),
+            "staging dir with only .tmp files should return false"
+        );
+
+        // Add a real .json file — now it should return true.
+        fs::write(dir.join("PR-42-pull_comment-100.json"), "{}").expect("write json");
+        assert!(
+            has_staged_amendments(tmp.path(), task_id),
+            "staging dir with a .json file should return true"
+        );
     }
 
     #[test]
