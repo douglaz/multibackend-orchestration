@@ -891,8 +891,8 @@ mod tests {
 
     #[test]
     fn whitelist_filtering() {
-        let whitelist = vec!["alice".to_string(), "bob".to_string()];
-        let comments = vec![
+        let whitelist = ["alice".to_string(), "bob".to_string()];
+        let comments = [
             PrReviewComment {
                 id: 1,
                 endpoint: CommentEndpoint::IssueComment,
@@ -1192,7 +1192,7 @@ mod tests {
         // quick_dev_phase should not be set for regular projects
         assert!(loaded
             .get("quick_dev_phase")
-            .map_or(true, |v| v.is_null() || v.as_str() == Some("completing")));
+            .is_none_or(|v| v.is_null() || v.as_str() == Some("completing")));
     }
 
     #[test]
