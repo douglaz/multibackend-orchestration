@@ -1088,10 +1088,16 @@ All work is complete.
 - None
 EOF
 elif grep -q "You are a project completion validator." <<< "$INPUT"; then
-  mkdir -p "{queue_dir}"
-  cat > "{queue_dir}/99999999999999-late-arrival.json" <<'EOF'
+  # Only inject the amendment once (first completer call).
+  # Use a marker file to avoid re-injecting on subsequent calls.
+  MARKER="{queue_dir}/.late-guard-injected"
+  if [ ! -f "$MARKER" ]; then
+    mkdir -p "{queue_dir}"
+    cat > "{queue_dir}/99999999999999-late-arrival.json" <<'EOF'
 {{"id":"EXT-LATE-001","body":"amendment injected during completing phase","priority":"P2","source":"cli","source_detail":"validate","created_at":"2026-03-09T00:00:00Z"}}
 EOF
+    touch "$MARKER"
+  fi
   cat <<'EOF'
 # Verdict: COMPLETE
 
