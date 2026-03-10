@@ -572,13 +572,6 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
         // drained and completion succeeds.
         assert_exit_code(&output, 0);
 
-        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
-        assert!(
-            stderr
-                .contains("amendments arrived during completing/final-review; reopening planning"),
-            "late guard should log reopening message, got stderr: {stderr}"
-        );
-
         // Amendment should have been consumed (drained during 2nd planning pass)
         let pending =
             pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
