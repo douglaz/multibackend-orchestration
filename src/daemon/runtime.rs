@@ -1487,61 +1487,70 @@ async fn dispatch_task(
         }
     }
 
-    // Refine the prompt if enabled.
-    // For prd-done issues, skip refinement entirely to preserve the exact
-    // approved spec (or compose_raw_idea fallback) as the dispatch payload.
-    let has_prd_done = issue_labels.iter().any(|l| l == "ralph:prd-done");
-    let (idea, refined_title, cleaned_body) = if config.refinement_enabled && !has_prd_done {
-        match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
-            .await
-        {
-            Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
-            Err(err) => {
-                eprintln!("warning: refinement failed for task {task_id}, using raw idea: {err}");
-                (raw_idea.to_owned(), None, None)
+    // Skip refinement, issue title/body updates, and refined-prompt comment for
+    // resumed projects — the issue already has real content from the original
+    // dispatch, and raw_idea may be a placeholder (e.g. PR review resume).
+    let idea = if resume_existing_project {
+        raw_idea.to_owned()
+    } else {
+        // Refine the prompt if enabled.
+        // For prd-done issues, skip refinement entirely to preserve the exact
+        // approved spec (or compose_raw_idea fallback) as the dispatch payload.
+        let has_prd_done = issue_labels.iter().any(|l| l == "ralph:prd-done");
+        let (idea, refined_title, cleaned_body) = if config.refinement_enabled && !has_prd_done {
+            match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
+                .await
+            {
+                Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
+                Err(err) => {
+                    eprintln!("warning: refinement failed for task {task_id}, using raw idea: {err}");
+                    (raw_idea.to_owned(), None, None)
+                }
+            }
+        } else {
+            (raw_idea.to_owned(), None, None)
+        };
+
+        // Update GitHub issue title with refined title (best-effort)
+        if let Some(ref title) = refined_title {
+            if let Err(err) =
+                github::update_issue_title(&config.owner, &config.repo, issue_number, title).await
+            {
+                eprintln!("warning: failed to update issue title for {task_id}: {err}");
             }
         }
-    } else {
-        (raw_idea.to_owned(), None, None)
+
+        // Update GitHub issue body with cleaned body (best-effort)
+        if let Some(ref cleaned_body) = cleaned_body {
+            if let Err(err) =
+                github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body).await
+            {
+                eprintln!("warning: failed to update issue body for {task_id}: {err}");
+            }
+        }
+
+        // Post refined-prompt comment (best-effort)
+        {
+            let comment_body = match &refined_title {
+                Some(title) => format!("**{title}**\n\n{idea}"),
+                None => idea.clone(),
+            };
+            if let Err(err) = github::post_idempotent_comment(
+                &config.owner,
+                &config.repo,
+                issue_number,
+                &task_id,
+                "refined-prompt",
+                &comment_body,
+            )
+            .await
+            {
+                eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
+            }
+        }
+
+        idea
     };
-
-    // Update GitHub issue title with refined title (best-effort)
-    if let Some(ref title) = refined_title {
-        if let Err(err) =
-            github::update_issue_title(&config.owner, &config.repo, issue_number, title).await
-        {
-            eprintln!("warning: failed to update issue title for {task_id}: {err}");
-        }
-    }
-
-    // Update GitHub issue body with cleaned body (best-effort)
-    if let Some(ref cleaned_body) = cleaned_body {
-        if let Err(err) =
-            github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body).await
-        {
-            eprintln!("warning: failed to update issue body for {task_id}: {err}");
-        }
-    }
-
-    // Post refined-prompt comment (best-effort)
-    {
-        let comment_body = match &refined_title {
-            Some(title) => format!("**{title}**\n\n{idea}"),
-            None => idea.clone(),
-        };
-        if let Err(err) = github::post_idempotent_comment(
-            &config.owner,
-            &config.repo,
-            issue_number,
-            &task_id,
-            "refined-prompt",
-            &comment_body,
-        )
-        .await
-        {
-            eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
-        }
-    }
 
     // Create log file for child output
     let log_path = task_log_path(&config.workspace_root, &task_id);
@@ -2459,6 +2468,10 @@ enum RebaseOutcome {
 
 /// PR review polling phase: detect review comments from whitelisted users on
 /// open PRs, stage amendments, and re-dispatch completed projects.
+///
+/// In addition to newly-discovered amendments, this also retries dispatch for
+/// tasks that have staged amendments from previous cycles (e.g. deferred due to
+/// capacity constraints).
 async fn pr_review_phase(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, TaskHandle>,
@@ -2467,14 +2480,54 @@ async fn pr_review_phase(
     let poll_results =
         super::pr_review::poll_pr_reviews(config, children).await?;
 
-    if poll_results.is_empty() {
+    // Build the set of task_ids that received new amendments this cycle.
+    let newly_staged: std::collections::HashSet<String> = poll_results
+        .iter()
+        .map(|r| r.task_id.clone())
+        .collect();
+
+    // Also discover tasks with previously-staged amendments (deferred on earlier
+    // cycles due to capacity or other transient issues).
+    let all_tasks = super::pr_review::discover_tasks_with_prs(
+        &config.workspace_root,
+        &config.owner,
+        &config.repo,
+    );
+
+    // Merge: poll_results + tasks with staged amendments not already in poll_results.
+    struct DispatchCandidate {
+        task_id: String,
+        issue_number: u32,
+    }
+
+    let mut candidates: Vec<DispatchCandidate> = poll_results
+        .iter()
+        .map(|r| DispatchCandidate {
+            task_id: r.task_id.clone(),
+            issue_number: r.issue_number,
+        })
+        .collect();
+
+    for task_info in &all_tasks {
+        if newly_staged.contains(&task_info.task_id) {
+            continue; // already a candidate from poll_results
+        }
+        if super::pr_review::has_staged_amendments(&config.workspace_root, &task_info.task_id) {
+            candidates.push(DispatchCandidate {
+                task_id: task_info.task_id.clone(),
+                issue_number: task_info.issue_number,
+            });
+        }
+    }
+
+    if candidates.is_empty() {
         return Ok(());
     }
 
-    // For each task that received new amendments, check if it needs re-dispatch.
-    for result in &poll_results {
+    // For each candidate, check if it needs re-dispatch.
+    for candidate in &candidates {
         // Skip if already running.
-        if children.contains_key(&result.issue_number) {
+        if children.contains_key(&candidate.issue_number) {
             continue;
         }
 
@@ -2485,7 +2538,7 @@ async fn pr_review_phase(
         if slots == 0 {
             eprintln!(
                 "PR review amendments pending for {} but no capacity slots available; deferring",
-                result.task_id
+                candidate.task_id
             );
             continue;
         }
@@ -2495,7 +2548,7 @@ async fn pr_review_phase(
             &config.gh_bin,
             &config.owner,
             &config.repo,
-            result.issue_number,
+            candidate.issue_number,
         )
         .await
         {
@@ -2503,7 +2556,7 @@ async fn pr_review_phase(
             Err(err) => {
                 eprintln!(
                     "warning: failed to fetch labels for issue #{} ({}): {err}",
-                    result.issue_number, result.task_id
+                    candidate.issue_number, candidate.task_id
                 );
                 continue;
             }
@@ -2515,15 +2568,15 @@ async fn pr_review_phase(
         }
 
         eprintln!(
-            "pr-review: resuming completed task {} with {} new amendment(s)",
-            result.task_id, result.new_amendment_count
+            "pr-review: resuming completed task {} with staged amendment(s)",
+            candidate.task_id
         );
 
         // Swap label: ralph:completed -> ralph:in-progress
         if let Err(err) = github::swap_lifecycle_label(
             &config.owner,
             &config.repo,
-            result.issue_number,
+            candidate.issue_number,
             "ralph:completed",
             "ralph:in-progress",
         )
@@ -2531,37 +2584,37 @@ async fn pr_review_phase(
         {
             eprintln!(
                 "warning: failed to swap lifecycle label for {}: {err}",
-                result.task_id
+                candidate.task_id
             );
             continue;
         }
 
         // Compose a minimal raw_idea for dispatch (it won't be used for resumed projects
         // since should_resume_issue_project will return true).
-        let raw_idea = format!("PR review amendments for issue #{}", result.issue_number);
+        let raw_idea = format!("PR review amendments for issue #{}", candidate.issue_number);
 
         // Dispatch the task. State reset and amendment drain happen inside dispatch_task
         // after worktree creation and before task spawn.
-        match dispatch_task(config, result.issue_number, &raw_idea, &labels, repo_root_lock)
+        match dispatch_task(config, candidate.issue_number, &raw_idea, &labels, repo_root_lock)
             .await
         {
             Ok(handle) => {
-                children.insert(result.issue_number, handle);
+                children.insert(candidate.issue_number, handle);
                 eprintln!(
                     "pr-review: dispatched task {} for PR review amendments",
-                    result.task_id
+                    candidate.task_id
                 );
             }
             Err(err) => {
                 eprintln!(
                     "warning: failed to dispatch task {} for PR review amendments: {err}",
-                    result.task_id
+                    candidate.task_id
                 );
                 // Revert label swap on dispatch failure.
                 let _ = github::swap_lifecycle_label(
                     &config.owner,
                     &config.repo,
-                    result.issue_number,
+                    candidate.issue_number,
                     "ralph:in-progress",
                     "ralph:completed",
                 )

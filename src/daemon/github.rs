@@ -2323,7 +2323,11 @@ pub async fn fetch_pr_review_comments(
     .await
     {
         Ok(raw) => {
-            let parsed: Vec<RawPullComment> = serde_json::from_str(&raw).unwrap_or_default();
+            let parsed: Vec<RawPullComment> = serde_json::from_str(&raw).map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to parse inline review comments for PR #{pr_number}: {err}"
+                ))
+            })?;
             for c in parsed {
                 comments.push(PrReviewComment {
                     id: c.id,
@@ -2349,7 +2353,11 @@ pub async fn fetch_pr_review_comments(
     .await
     {
         Ok(raw) => {
-            let parsed: Vec<RawIssueComment> = serde_json::from_str(&raw).unwrap_or_default();
+            let parsed: Vec<RawIssueComment> = serde_json::from_str(&raw).map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to parse top-level PR comments for PR #{pr_number}: {err}"
+                ))
+            })?;
             for c in parsed {
                 comments.push(PrReviewComment {
                     id: c.id,
@@ -2377,7 +2385,11 @@ pub async fn fetch_pr_review_comments(
     .await
     {
         Ok(raw) => {
-            let parsed: Vec<RawReview> = serde_json::from_str(&raw).unwrap_or_default();
+            let parsed: Vec<RawReview> = serde_json::from_str(&raw).map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to parse review summaries for PR #{pr_number}: {err}"
+                ))
+            })?;
             for r in parsed {
                 let body = r.body.unwrap_or_default();
                 if body.trim().is_empty() {
@@ -2453,89 +2465,39 @@ async fn fetch_endpoint_json(gh_bin: &str, endpoint: &str) -> Result<String> {
     // `--paginate` concatenates JSON arrays, producing `[...][...]...` when
     // multiple pages exist. Merge them into a single array.
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(merge_paginated_json_arrays(&raw))
+    merge_paginated_json_arrays(&raw)
 }
 
 /// Merge adjacent JSON arrays (as produced by `gh api --paginate`) into one.
 ///
 /// Input: `[{"a":1}][{"b":2}]` → Output: `[{"a":1},{"b":2}]`
 /// Single array input is returned unchanged.
-fn merge_paginated_json_arrays(raw: &str) -> String {
+///
+/// Uses `serde_json::Deserializer` streaming to correctly handle brackets
+/// inside JSON string values (e.g. comment bodies containing `[` or `]`).
+fn merge_paginated_json_arrays(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return "[]".to_string();
+        return Ok("[]".to_string());
     }
 
-    // Fast path: single array (most common case).
-    // Count top-level `[` - if only one, it's a single array.
-    let mut depth = 0i32;
-    let mut top_level_arrays = 0u32;
-    for ch in trimmed.chars() {
-        match ch {
-            '[' => {
-                if depth == 0 {
-                    top_level_arrays += 1;
-                }
-                depth += 1;
-            }
-            ']' => {
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-
-    if top_level_arrays <= 1 {
-        return trimmed.to_string();
-    }
-
-    // Multi-page: parse each array and merge.
     let mut merged = Vec::new();
-    let mut remaining = trimmed;
-    while !remaining.is_empty() {
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        match serde_json::from_str::<serde_json::Value>(remaining) {
-            Ok(val) => {
-                if let serde_json::Value::Array(arr) = val {
-                    merged.extend(arr);
-                }
-                // This consumed the entire remaining string as one value.
-                break;
-            }
-            Err(_) => {
-                // Try to find the end of the first JSON array.
-                let mut d = 0i32;
-                let mut end = 0;
-                for (i, ch) in remaining.char_indices() {
-                    match ch {
-                        '[' => d += 1,
-                        ']' => {
-                            d -= 1;
-                            if d == 0 {
-                                end = i + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if end == 0 {
-                    break;
-                }
-                if let Ok(serde_json::Value::Array(arr)) =
-                    serde_json::from_str::<serde_json::Value>(&remaining[..end])
-                {
-                    merged.extend(arr);
-                }
-                remaining = &remaining[end..];
-            }
+    let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    for value in stream {
+        let value = value.map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to parse paginated JSON from GitHub API: {err}"
+            ))
+        })?;
+        match value {
+            serde_json::Value::Array(arr) => merged.extend(arr),
+            other => merged.push(other),
         }
     }
 
-    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string(&merged).map_err(|err| {
+        RalphError::Orchestration(format!("failed to serialize merged JSON: {err}"))
+    })
 }
 
 #[cfg(test)]
@@ -3380,21 +3342,39 @@ exit 0
     #[test]
     fn merge_paginated_json_arrays_single() {
         let input = r#"[{"a":1},{"b":2}]"#;
-        let result = super::merge_paginated_json_arrays(input);
+        let result = super::merge_paginated_json_arrays(input).unwrap();
         assert_eq!(result, input);
     }
 
     #[test]
     fn merge_paginated_json_arrays_multi() {
         let input = r#"[{"a":1}][{"b":2}]"#;
-        let result = super::merge_paginated_json_arrays(input);
+        let result = super::merge_paginated_json_arrays(input).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed.len(), 2);
     }
 
     #[test]
     fn merge_paginated_json_arrays_empty() {
-        let result = super::merge_paginated_json_arrays("");
+        let result = super::merge_paginated_json_arrays("").unwrap();
         assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn merge_paginated_json_arrays_brackets_in_strings() {
+        // Comment body contains brackets that would confuse naive bracket counting.
+        let input = r#"[{"body":"fix [this] and ]that["}][{"body":"ok"}]"#;
+        let result = super::merge_paginated_json_arrays(input).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["body"], "fix [this] and ]that[");
+        assert_eq!(parsed[1]["body"], "ok");
+    }
+
+    #[test]
+    fn merge_paginated_json_arrays_invalid_json_returns_error() {
+        let input = r#"[{"a":1}][not valid json"#;
+        let result = super::merge_paginated_json_arrays(input);
+        assert!(result.is_err());
     }
 }
