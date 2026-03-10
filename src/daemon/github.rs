@@ -2319,7 +2319,8 @@ impl PrReviewComment {
 #[derive(Debug, Deserialize)]
 struct RawPullComment {
     id: u64,
-    user: RawUser,
+    #[serde(default)]
+    user: Option<RawUser>,
     body: Option<String>,
     path: Option<String>,
     line: Option<u32>,
@@ -2333,7 +2334,8 @@ struct RawPullComment {
 #[derive(Debug, Deserialize)]
 struct RawIssueComment {
     id: u64,
-    user: RawUser,
+    #[serde(default)]
+    user: Option<RawUser>,
     body: Option<String>,
     created_at: String,
 }
@@ -2342,7 +2344,8 @@ struct RawIssueComment {
 #[derive(Debug, Deserialize)]
 struct RawReview {
     id: u64,
-    user: RawUser,
+    #[serde(default)]
+    user: Option<RawUser>,
     body: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
@@ -2353,6 +2356,130 @@ struct RawReview {
 #[derive(Debug, Deserialize)]
 struct RawUser {
     login: String,
+}
+
+/// Parse raw JSON from `/pulls/{n}/comments` into `PrReviewComment`s.
+///
+/// Entries with missing or empty `user.login` are skipped with a warning.
+/// Returns an empty vec on parse failure (logged as warning).
+fn parse_pull_comments(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
+    let parsed: Vec<RawPullComment> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to parse inline review comments for PR #{pr_number}: {err}"
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for c in parsed {
+        if c.in_reply_to_id.is_some() {
+            continue;
+        }
+        let login = match &c.user {
+            Some(u) if !u.login.is_empty() => u.login.clone(),
+            _ => {
+                eprintln!(
+                    "warning: skipping inline review comment {} for PR #{pr_number}: missing or empty user",
+                    c.id
+                );
+                continue;
+            }
+        };
+        out.push(PrReviewComment {
+            id: c.id,
+            endpoint: CommentEndpoint::PullComment,
+            author: login,
+            body: c.body.unwrap_or_default(),
+            path: c.path,
+            line: c.line,
+            created_at: c.created_at,
+        });
+    }
+    out
+}
+
+/// Parse raw JSON from `/issues/{n}/comments` into `PrReviewComment`s.
+///
+/// Entries with missing or empty `user.login` are skipped with a warning.
+/// Returns an empty vec on parse failure (logged as warning).
+fn parse_issue_comments(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
+    let parsed: Vec<RawIssueComment> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to parse top-level PR comments for PR #{pr_number}: {err}"
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for c in parsed {
+        let login = match &c.user {
+            Some(u) if !u.login.is_empty() => u.login.clone(),
+            _ => {
+                eprintln!(
+                    "warning: skipping top-level PR comment {} for PR #{pr_number}: missing or empty user",
+                    c.id
+                );
+                continue;
+            }
+        };
+        out.push(PrReviewComment {
+            id: c.id,
+            endpoint: CommentEndpoint::IssueComment,
+            author: login,
+            body: c.body.unwrap_or_default(),
+            path: None,
+            line: None,
+            created_at: c.created_at,
+        });
+    }
+    out
+}
+
+/// Parse raw JSON from `/pulls/{n}/reviews` into `PrReviewComment`s.
+///
+/// Reviews with empty body and entries with missing or empty `user.login` are
+/// skipped. Returns an empty vec on parse failure (logged as warning).
+fn parse_review_summaries(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
+    let parsed: Vec<RawReview> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to parse review summaries for PR #{pr_number}: {err}"
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for r in parsed {
+        let body = r.body.unwrap_or_default();
+        if body.trim().is_empty() {
+            continue;
+        }
+        let login = match &r.user {
+            Some(u) if !u.login.is_empty() => u.login.clone(),
+            _ => {
+                eprintln!(
+                    "warning: skipping review summary {} for PR #{pr_number}: missing or empty user",
+                    r.id
+                );
+                continue;
+            }
+        };
+        out.push(PrReviewComment {
+            id: r.id,
+            endpoint: CommentEndpoint::Review,
+            author: login,
+            body,
+            path: None,
+            line: None,
+            created_at: r.submitted_at.unwrap_or_default(),
+        });
+    }
+    out
 }
 
 /// Fetch PR review comments from all three GitHub endpoints.
@@ -2376,28 +2503,7 @@ pub async fn fetch_pr_review_comments(
     )
     .await
     {
-        Ok(raw) => {
-            let parsed: Vec<RawPullComment> = serde_json::from_str(&raw).map_err(|err| {
-                RalphError::Orchestration(format!(
-                    "failed to parse inline review comments for PR #{pr_number}: {err}"
-                ))
-            })?;
-            for c in parsed {
-                // Skip replies to other inline comments (out of scope).
-                if c.in_reply_to_id.is_some() {
-                    continue;
-                }
-                comments.push(PrReviewComment {
-                    id: c.id,
-                    endpoint: CommentEndpoint::PullComment,
-                    author: c.user.login,
-                    body: c.body.unwrap_or_default(),
-                    path: c.path,
-                    line: c.line,
-                    created_at: c.created_at,
-                });
-            }
-        }
+        Ok(raw) => comments.extend(parse_pull_comments(&raw, pr_number)),
         Err(err) => {
             eprintln!("warning: failed to fetch inline review comments for PR #{pr_number}: {err}");
         }
@@ -2410,24 +2516,7 @@ pub async fn fetch_pr_review_comments(
     )
     .await
     {
-        Ok(raw) => {
-            let parsed: Vec<RawIssueComment> = serde_json::from_str(&raw).map_err(|err| {
-                RalphError::Orchestration(format!(
-                    "failed to parse top-level PR comments for PR #{pr_number}: {err}"
-                ))
-            })?;
-            for c in parsed {
-                comments.push(PrReviewComment {
-                    id: c.id,
-                    endpoint: CommentEndpoint::IssueComment,
-                    author: c.user.login,
-                    body: c.body.unwrap_or_default(),
-                    path: None,
-                    line: None,
-                    created_at: c.created_at,
-                });
-            }
-        }
+        Ok(raw) => comments.extend(parse_issue_comments(&raw, pr_number)),
         Err(err) => {
             eprintln!(
                 "warning: failed to fetch top-level PR comments for PR #{pr_number}: {err}"
@@ -2442,28 +2531,7 @@ pub async fn fetch_pr_review_comments(
     )
     .await
     {
-        Ok(raw) => {
-            let parsed: Vec<RawReview> = serde_json::from_str(&raw).map_err(|err| {
-                RalphError::Orchestration(format!(
-                    "failed to parse review summaries for PR #{pr_number}: {err}"
-                ))
-            })?;
-            for r in parsed {
-                let body = r.body.unwrap_or_default();
-                if body.trim().is_empty() {
-                    continue;
-                }
-                comments.push(PrReviewComment {
-                    id: r.id,
-                    endpoint: CommentEndpoint::Review,
-                    author: r.user.login,
-                    body,
-                    path: None,
-                    line: None,
-                    created_at: r.submitted_at.unwrap_or_default(),
-                });
-            }
-        }
+        Ok(raw) => comments.extend(parse_review_summaries(&raw, pr_number)),
         Err(err) => {
             eprintln!("warning: failed to fetch review summaries for PR #{pr_number}: {err}");
         }
@@ -3320,7 +3388,7 @@ exit 0
         let parsed: Vec<super::RawPullComment> = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].id, 100);
-        assert_eq!(parsed[0].user.login, "alice");
+        assert_eq!(parsed[0].user.as_ref().unwrap().login, "alice");
         assert_eq!(parsed[0].body, Some("fix this line".to_string()));
         assert_eq!(parsed[0].path, Some("src/main.rs".to_string()));
         assert_eq!(parsed[0].line, Some(42));
@@ -3358,7 +3426,7 @@ exit 0
             .collect();
         assert_eq!(top_level.len(), 1, "only top-level comment should be kept");
         assert_eq!(top_level[0].id, 100);
-        assert_eq!(top_level[0].user.login, "alice");
+        assert_eq!(top_level[0].user.as_ref().unwrap().login, "alice");
     }
 
     #[test]
@@ -3374,7 +3442,7 @@ exit 0
         let parsed: Vec<super::RawIssueComment> = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].id, 200);
-        assert_eq!(parsed[0].user.login, "bob");
+        assert_eq!(parsed[0].user.as_ref().unwrap().login, "bob");
     }
 
     #[test]
@@ -3416,7 +3484,7 @@ exit 0
             })
             .collect();
         assert_eq!(non_empty.len(), 1);
-        assert_eq!(non_empty[0].user.login, "carol");
+        assert_eq!(non_empty[0].user.as_ref().unwrap().login, "carol");
     }
 
     #[test]
@@ -3469,5 +3537,103 @@ exit 0
         let input = r#"[{"a":1}][not valid json"#;
         let result = super::merge_paginated_json_arrays(input);
         assert!(result.is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // PR review comment parsing: null/missing user resilience
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_pull_comments_skips_null_user_keeps_valid() {
+        let json = r#"[
+            {"id":1,"user":{"login":"alice"},"body":"fix this","path":"src/main.rs","line":10,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null},
+            {"id":2,"user":null,"body":"ghost comment","path":"src/lib.rs","line":5,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null},
+            {"id":3,"user":{"login":"bob"},"body":"also fix","path":null,"line":null,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null}
+        ]"#;
+        let comments = super::parse_pull_comments(json, 42);
+        assert_eq!(comments.len(), 2, "null-user entry should be skipped");
+        assert_eq!(comments[0].author, "alice");
+        assert_eq!(comments[0].id, 1);
+        assert_eq!(comments[1].author, "bob");
+        assert_eq!(comments[1].id, 3);
+    }
+
+    #[test]
+    fn parse_pull_comments_skips_missing_user_field() {
+        // user field entirely absent (serde(default) → None)
+        let json = r#"[
+            {"id":1,"body":"no user field","path":null,"line":null,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null},
+            {"id":2,"user":{"login":"valid"},"body":"ok","path":null,"line":null,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null}
+        ]"#;
+        let comments = super::parse_pull_comments(json, 1);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "valid");
+    }
+
+    #[test]
+    fn parse_pull_comments_skips_empty_login() {
+        let json = r#"[
+            {"id":1,"user":{"login":""},"body":"empty login","path":null,"line":null,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null},
+            {"id":2,"user":{"login":"real"},"body":"ok","path":null,"line":null,"created_at":"2024-01-01T00:00:00Z","in_reply_to_id":null}
+        ]"#;
+        let comments = super::parse_pull_comments(json, 1);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "real");
+    }
+
+    #[test]
+    fn parse_pull_comments_returns_empty_on_malformed_json() {
+        let json = r#"not valid json"#;
+        let comments = super::parse_pull_comments(json, 42);
+        assert!(comments.is_empty(), "malformed JSON should return empty vec, not error");
+    }
+
+    #[test]
+    fn parse_issue_comments_skips_null_user_keeps_valid() {
+        let json = r#"[
+            {"id":10,"user":{"login":"alice"},"body":"looks good","created_at":"2024-01-01T00:00:00Z"},
+            {"id":11,"user":null,"body":"ghost","created_at":"2024-01-01T00:00:00Z"},
+            {"id":12,"user":{"login":"bob"},"body":"please fix","created_at":"2024-01-01T00:00:00Z"}
+        ]"#;
+        let comments = super::parse_issue_comments(json, 7);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].author, "alice");
+        assert_eq!(comments[1].author, "bob");
+    }
+
+    #[test]
+    fn parse_issue_comments_returns_empty_on_malformed_json() {
+        let comments = super::parse_issue_comments("}{bad", 7);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn parse_review_summaries_skips_null_user_keeps_valid() {
+        let json = r#"[
+            {"id":100,"user":{"login":"reviewer"},"body":"needs work","state":"CHANGES_REQUESTED","submitted_at":"2024-01-01T00:00:00Z"},
+            {"id":101,"user":null,"body":"ghost review","state":"COMMENTED","submitted_at":"2024-01-01T00:00:00Z"},
+            {"id":102,"user":{"login":"lead"},"body":"approved","state":"APPROVED","submitted_at":"2024-01-01T00:00:00Z"}
+        ]"#;
+        let comments = super::parse_review_summaries(json, 99);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].author, "reviewer");
+        assert_eq!(comments[1].author, "lead");
+    }
+
+    #[test]
+    fn parse_review_summaries_returns_empty_on_malformed_json() {
+        let comments = super::parse_review_summaries("[invalid", 99);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn parse_review_summaries_skips_empty_body_even_with_valid_user() {
+        let json = r#"[
+            {"id":200,"user":{"login":"reviewer"},"body":"","state":"COMMENTED","submitted_at":"2024-01-01T00:00:00Z"},
+            {"id":201,"user":{"login":"reviewer"},"body":"real feedback","state":"COMMENTED","submitted_at":"2024-01-01T00:00:00Z"}
+        ]"#;
+        let comments = super::parse_review_summaries(json, 5);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, 201);
     }
 }

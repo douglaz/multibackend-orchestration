@@ -1453,6 +1453,19 @@ async fn dispatch_task(
         spawn_blocking_op(move || Ok(should_resume_issue_project(&wt, &pid))).await?
     };
 
+    // PrReviewResume dispatches MUST resume an existing project.  If the
+    // project state is missing or corrupt (no prompt.md on the branch),
+    // fall back would start a fresh implementation cycle with a placeholder
+    // prompt — which is never correct.  Fail fast *before* draining staged
+    // amendments so pr_review_phase can roll back the label swap and
+    // preserve staged amendments without side effects.
+    if origin == DispatchOrigin::PrReviewResume && !resume_existing_project {
+        return Err(RalphError::Orchestration(format!(
+            "PrReviewResume dispatch for {task_id} cannot resume: project state not found in worktree \
+             (prompt.md missing on branch {branch_name}); aborting to preserve staged amendments"
+        )));
+    }
+
     // Drain any staged PR review amendments into the project's amendment queue.
     // Both drain and purge are gated to PrReviewResume dispatches only — running
     // them on normal Claim paths would consume staged amendments without the
@@ -1493,16 +1506,6 @@ async fn dispatch_task(
 
     if resume_existing_project {
         eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
-    } else if origin == DispatchOrigin::PrReviewResume {
-        // PrReviewResume dispatches MUST resume an existing project.  If the
-        // project state is missing or corrupt (no prompt.md on the branch),
-        // fall back would start a fresh implementation cycle with a placeholder
-        // prompt — which is never correct.  Fail fast so pr_review_phase can
-        // roll back the label swap and preserve staged amendments.
-        return Err(RalphError::Orchestration(format!(
-            "PrReviewResume dispatch for {task_id} cannot resume: project state not found in worktree \
-             (prompt.md missing on branch {branch_name}); aborting to preserve staged amendments"
-        )));
     } else {
         let legacy_slug_branch = {
             let wt = wt_path.clone();

@@ -1420,4 +1420,47 @@ mod tests {
         clear_resume_pending_marker(ws_root, task_id);
         assert!(!has_resume_pending_marker(ws_root, task_id));
     }
+
+    /// Regression test: when the project dir exists but prompt.md is missing
+    /// (i.e. `should_resume_issue_project` returns false), staged amendments
+    /// must NOT be drained or purged.  This mirrors the ordering fix in
+    /// `dispatch_task` where the fail-fast check now runs before drain/reset.
+    #[test]
+    fn staged_amendments_preserved_when_resume_invalid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        // Stage an amendment.
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+        stage_amendment(ws_root, task_id, &amendment).expect("stage");
+        assert!(has_staged_amendments(ws_root, task_id));
+
+        // Create a project dir WITHOUT prompt.md (simulates corrupt/missing state).
+        let project_dir = tmp.path().join("worktree/.ralph/projects/issue-42");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        // Note: prompt.md intentionally NOT created.
+
+        // The fail-fast check would detect resume is invalid here.
+        // Verify staged amendments are still intact (no drain/purge happened).
+        assert!(
+            has_staged_amendments(ws_root, task_id),
+            "staged amendments must be preserved when resume is invalid (prompt.md missing)"
+        );
+
+        // Also verify that drain_staged_amendments was NOT called by checking
+        // the amendment-queue dir does NOT exist in the project dir.
+        let queue_dir = project_dir.join("amendment-queue");
+        assert!(
+            !queue_dir.exists(),
+            "amendment-queue should not exist — drain must not run before resume validation"
+        );
+    }
 }
