@@ -218,7 +218,7 @@ where
         }
     }
 
-    queue_files.sort_by_key(queue_sort_key);
+    queue_files.sort_by_key(|p| queue_sort_key(p));
 
     let mut drained = Vec::new();
     let mut inflight_to_cleanup = Vec::new();
@@ -584,7 +584,7 @@ fn claim_file_without_overwrite(
     }
 }
 
-fn queue_sort_key(path: &PathBuf) -> String {
+fn queue_sort_key(path: &Path) -> String {
     path.file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().to_string())
 }
@@ -1321,7 +1321,7 @@ mod tests {
                 .expect("valid datetime"),
         };
 
-        let failed = re_enqueue_amendments(project_dir, &[req.clone()]);
+        let failed = re_enqueue_amendments(project_dir, std::slice::from_ref(&req));
         assert!(failed.is_empty());
 
         let drained = drain_amendment_queue(project_dir).expect("drain");

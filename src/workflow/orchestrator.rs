@@ -3346,6 +3346,7 @@ fn build_prompt_review_validator_prompt(
     Ok(rendered)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_planner_prompt(
     effective: &EffectiveConfig,
     state: &ProjectState,
