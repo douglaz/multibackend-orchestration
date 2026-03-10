@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::*;
@@ -54,7 +53,9 @@ where
 
 fn draft_watcher_creates_draft_when_branch_ahead(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = &h.repo_root;
 
         git(repo, &["checkout", "-b", "ralph/test-draft-create"]);
@@ -115,7 +116,9 @@ fn draft_watcher_creates_draft_when_branch_ahead(h: &RalphHarness) -> TestResult
 
 fn draft_watcher_pushes_before_create(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = &h.repo_root;
 
         git(repo, &["checkout", "-b", "ralph/test-push-before-create"]);
@@ -189,7 +192,9 @@ fn draft_watcher_pushes_before_create(h: &RalphHarness) -> TestResult {
 
 fn draft_watcher_exits_cleanly_on_cancellation(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = &h.repo_root;
         git(repo, &["checkout", "master"]);
 
@@ -341,7 +346,9 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
 
 fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().expect("tempdir");
         let mock_dir = temp.path().join("bin");
         fs::create_dir_all(&mock_dir).expect("mkdir mock bin");
@@ -406,7 +413,9 @@ fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
 /// (e.g. "main") is resolvable.
 fn draft_watcher_fallback_base_when_configured_missing(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = &h.repo_root;
 
         // Rename the remote default branch to "main" and delete "master" so
@@ -510,11 +519,6 @@ fn write_mock_gh_path(h: &RalphHarness, body: &str) -> crate::Result<String> {
         .unwrap_or_default();
     let existing = std::env::var("PATH").unwrap_or_default();
     Ok(format!("{base}:{existing}"))
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 struct PathEnvGuard {

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::util::time::{format_timestamp_yyyymmddhhmmss, now_utc};
 use crate::Result;
@@ -265,6 +266,15 @@ pub fn resolve_artifact_path_by_suffix(
     loop_slug: &str,
     suffix: &str,
 ) -> Result<Option<String>> {
+    resolve_artifact_path_by_suffixes(project_dir, loop_number, loop_slug, &[suffix])
+}
+
+pub fn resolve_artifact_path_by_suffixes(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    suffixes: &[&str],
+) -> Result<Option<String>> {
     let loop_dir_name = format!("{loop_number:03}-{loop_slug}");
     let loop_dir = project_dir.join("loops").join(loop_dir_name);
 
@@ -274,7 +284,7 @@ pub fn resolve_artifact_path_by_suffix(
         Err(err) => return Err(err.into()),
     };
 
-    let mut best: Option<(Option<String>, String)> = None;
+    let mut best: Option<(Option<String>, Option<SystemTime>, String)> = None;
     for entry in read_dir {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -286,44 +296,76 @@ pub fn resolve_artifact_path_by_suffix(
             continue;
         };
 
-        let timestamp = if file_name == suffix {
+        let matched_suffix = suffixes.iter().find(|suffix| {
+            file_name == **suffix
+                || parse_artifact_filename_timestamp(file_name)
+                    .map(|_| file_name.ends_with(&format!("-{suffix}")))
+                    .unwrap_or(false)
+        });
+        let Some(matched_suffix) = matched_suffix else {
+            continue;
+        };
+        let timestamp = if file_name == *matched_suffix {
             None
         } else if let Some(prefix) = parse_artifact_filename_timestamp(file_name) {
-            let expected_suffix = format!("-{suffix}");
-            if file_name.ends_with(&expected_suffix) {
-                Some(prefix)
-            } else {
-                continue;
-            }
+            Some(prefix)
         } else {
             continue;
         };
 
+        let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
         let rel = artifact_relative_path(project_dir, &entry.path());
         match &best {
-            None => best = Some((timestamp, rel)),
-            Some((best_ts, best_rel)) => {
-                if is_candidate_better(timestamp.as_deref(), best_ts.as_deref(), &rel, best_rel) {
-                    best = Some((timestamp, rel));
+            None => best = Some((timestamp, modified, rel)),
+            Some((best_ts, best_modified, best_rel)) => {
+                if is_candidate_better(
+                    timestamp.as_deref(),
+                    modified,
+                    best_ts.as_deref(),
+                    *best_modified,
+                    &rel,
+                    best_rel,
+                ) {
+                    best = Some((timestamp, modified, rel));
                 }
             }
         }
     }
 
-    Ok(best.map(|(_, rel)| rel))
+    Ok(best.map(|(_, _, rel)| rel))
 }
 
 fn is_candidate_better(
     candidate_ts: Option<&str>,
+    candidate_modified: Option<SystemTime>,
     best_ts: Option<&str>,
+    best_modified: Option<SystemTime>,
     candidate_rel: &str,
     best_rel: &str,
 ) -> bool {
     match (candidate_ts, best_ts) {
-        (Some(c), Some(b)) => c > b || (c == b && candidate_rel > best_rel),
+        (Some(c), Some(b)) => {
+            c > b
+                || (c == b
+                    && match (candidate_modified, best_modified) {
+                        (Some(candidate), Some(best)) => {
+                            candidate > best || (candidate == best && candidate_rel > best_rel)
+                        }
+                        (Some(_), None) => true,
+                        (None, Some(_)) => false,
+                        (None, None) => candidate_rel > best_rel,
+                    })
+        }
         (Some(_), None) => true,
         (None, Some(_)) => false,
-        (None, None) => candidate_rel > best_rel,
+        (None, None) => match (candidate_modified, best_modified) {
+            (Some(candidate), Some(best)) => {
+                candidate > best || (candidate == best && candidate_rel > best_rel)
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => candidate_rel > best_rel,
+        },
     }
 }
 
@@ -366,8 +408,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        resolve_artifact_path_by_suffix, write_artifact, write_project_scoped_artifact,
-        ArtifactKind, ArtifactWriteInput, ProjectScopedArtifactWriteInput,
+        resolve_artifact_path_by_suffix, resolve_artifact_path_by_suffixes, write_artifact,
+        write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+        ProjectScopedArtifactWriteInput,
     };
 
     #[test]
@@ -426,6 +469,80 @@ mod tests {
         assert_eq!(
             resolved,
             "loops/001-demo/20260203060159-review-001-feedback.md"
+        );
+    }
+
+    #[test]
+    fn resolve_artifact_path_by_suffixes_prefers_latest_matching_file() {
+        let temp = TempDir::new().expect("temp dir");
+        let loop_dir = temp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        std::fs::write(
+            loop_dir.join("20260203055910-quick-dev-final-review-implementer-issues.md"),
+            "older issues",
+        )
+        .expect("write older issues");
+        std::fs::write(
+            loop_dir.join("20260203060159-quick-dev-final-review-implementer-complete.md"),
+            "newer complete",
+        )
+        .expect("write newer complete");
+
+        let resolved = resolve_artifact_path_by_suffixes(
+            temp.path(),
+            1,
+            "demo",
+            &[
+                "quick-dev-final-review-implementer-issues.md",
+                "quick-dev-final-review-implementer-complete.md",
+            ],
+        )
+        .expect("resolve")
+        .expect("path should exist");
+
+        assert_eq!(
+            resolved,
+            "loops/001-demo/20260203060159-quick-dev-final-review-implementer-complete.md"
+        );
+    }
+
+    #[test]
+    fn resolve_artifact_path_by_suffixes_breaks_same_timestamp_ties_by_modified_time() {
+        let temp = TempDir::new().expect("temp dir");
+        let loop_dir = temp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        std::fs::write(
+            loop_dir.join("20260203060159-quick-dev-final-review-implementer-issues.md"),
+            "older issues",
+        )
+        .expect("write older issues");
+
+        // Same-second filename ties need a real write-order signal.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        std::fs::write(
+            loop_dir.join("20260203060159-quick-dev-final-review-implementer-complete.md"),
+            "newer complete",
+        )
+        .expect("write newer complete");
+
+        let resolved = resolve_artifact_path_by_suffixes(
+            temp.path(),
+            1,
+            "demo",
+            &[
+                "quick-dev-final-review-implementer-issues.md",
+                "quick-dev-final-review-implementer-complete.md",
+            ],
+        )
+        .expect("resolve")
+        .expect("path should exist");
+
+        assert_eq!(
+            resolved,
+            "loops/001-demo/20260203060159-quick-dev-final-review-implementer-complete.md"
         );
     }
 

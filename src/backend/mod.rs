@@ -1513,6 +1513,7 @@ fn backend_with_optional_tmux(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -1679,10 +1680,20 @@ mod tests {
         body: &str,
     ) -> std::path::PathBuf {
         let path = dir.join(name);
-        fs::write(&path, body).expect("write script");
+        let mut file = fs::File::create(&path).expect("create script");
+        file.write_all(body.as_bytes()).expect("write script");
+        file.flush().expect("flush script");
+        file.sync_all().expect("sync script");
+        drop(file);
+
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms).expect("chmod script");
+
+        if let Ok(dir_handle) = fs::File::open(dir) {
+            let _ = dir_handle.sync_all();
+        }
+
         path
     }
 

@@ -1,5 +1,4 @@
 use std::fs;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -9,9 +8,6 @@ use crate::daemon::rebase_agent::{
     resolve_rebase_conflicts, RebaseAgentBackend, RebaseFailureKind,
 };
 use crate::validate::harness::RalphHarness;
-
-/// Mutex to serialize tests that mutate the process env override.
-static CLAUDE_BIN_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -615,7 +611,9 @@ fn with_mock_claude_bin<F, R>(mock_claude_path: &std::path::Path, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let _guard = CLAUDE_BIN_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::validate::process_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let original = std::env::var("RALPH_REBASE_AGENT_CLAUDE_BIN").ok();
     unsafe {
         std::env::set_var(
