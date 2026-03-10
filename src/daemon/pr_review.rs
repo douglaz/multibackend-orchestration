@@ -199,7 +199,11 @@ pub fn has_staged_amendments(workspace_root: &Path, task_id: &str) -> bool {
 ///
 /// For quick-dev projects (identified by `is_quick` flag):
 ///   - `status` → `InProgress`
-///   - `quick_dev_phase` → `Some(CodexReview)`
+///   - `quick_dev_phase` → `Some(PlanAndImplement)`
+///   - `current_phase` → `implementing`
+///   - `quick_dev_review_iteration` → `0`
+///   - `quick_dev_final_review_attempts` → `0`
+///   - `phase_iteration` → `1`
 ///
 /// For regular projects:
 ///   - `status` → `InProgress`
@@ -232,6 +236,11 @@ pub fn reset_project_state_for_resume(
         state["quick_dev_phase"] =
             serde_json::Value::String("plan_and_implement".to_string());
         state["current_phase"] = serde_json::Value::String("implementing".to_string());
+        // Reset retry counters so the orchestrator does not immediately
+        // force-complete due to stale values from a previous run.
+        state["quick_dev_review_iteration"] = serde_json::Value::Number(0.into());
+        state["quick_dev_final_review_attempts"] = serde_json::Value::Number(0.into());
+        state["phase_iteration"] = serde_json::Value::Number(1.into());
     }
 
     let json = serde_json::to_string_pretty(&state).map_err(|err| {
@@ -1031,6 +1040,58 @@ mod tests {
             let parsed: CommentEndpoint = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(endpoint, parsed);
         }
+    }
+
+    #[test]
+    fn reset_quick_dev_clears_stale_retry_counters() {
+        // A previously force-completed quick-dev project has non-zero retry
+        // counters.  After reset these must be zero so the orchestrator does
+        // not immediately trip the guard-at-entry force-complete path.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path();
+
+        let state = serde_json::json!({
+            "project_id": "issue-42",
+            "project_name": "test",
+            "status": "completed",
+            "current_phase": "completing",
+            "quick_dev_phase": null,
+            "current_loop": 1,
+            "phase_iteration": 5,
+            "quick_dev_review_iteration": 3,
+            "quick_dev_final_review_attempts": 2,
+            "prompt_file": "prompt.md",
+            "parent_project": null,
+            "loops": [],
+            "completion_attempts": [],
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            project_dir.join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .expect("write state");
+
+        reset_project_state_for_resume(project_dir, true).expect("reset");
+
+        let content = fs::read_to_string(project_dir.join("state.json")).expect("read");
+        let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
+
+        assert_eq!(loaded["status"], "in_progress");
+        assert_eq!(loaded["quick_dev_phase"], "plan_and_implement");
+        assert_eq!(loaded["current_phase"], "implementing");
+        assert_eq!(
+            loaded["quick_dev_review_iteration"], 0,
+            "quick_dev_review_iteration must be reset to 0"
+        );
+        assert_eq!(
+            loaded["quick_dev_final_review_attempts"], 0,
+            "quick_dev_final_review_attempts must be reset to 0"
+        );
+        assert_eq!(
+            loaded["phase_iteration"], 1,
+            "phase_iteration must be normalized to 1"
+        );
     }
 
     #[test]

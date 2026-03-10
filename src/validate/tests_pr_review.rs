@@ -35,6 +35,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::dispatch_failure_preserves_staged_amendments",
             func: dispatch_failure_preserves_staged_amendments,
         },
+        ConformanceTest {
+            name: "pr_review::quick_dev_resume_clears_stale_counters",
+            func: quick_dev_resume_clears_stale_counters,
+        },
     ]
 }
 
@@ -648,6 +652,140 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
     })
 }
 
+/// Run a daemon tick with a completed quick-dev project whose state.json has
+/// non-zero `quick_dev_review_iteration` and `quick_dev_final_review_attempts`
+/// (simulating a previously force-completed project).  Assert that the counters
+/// are reset to zero so the orchestrator does not immediately trip the
+/// guard-at-entry force-complete path.
+fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-60", 80);
+        setup_project_branch_with_stale_counters(&dh.repo_root, 60);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-60");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-80-issue_comment-1",
+            "body": "fix it",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#80/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-80-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let label_log = dh.temp_dir.path().join("stale_counter_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify dispatch was attempted.
+        assert!(
+            stderr.contains("pr-review: resuming completed task"),
+            "stderr should log resume attempt for quick-dev project with stale counters"
+        );
+
+        // After dispatch, check the project state inside the worktree.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        if worktrees_dir.exists() {
+            for entry in fs::read_dir(&worktrees_dir)
+                .unwrap_or_else(|_| panic!("read worktrees dir"))
+                .filter_map(|e| e.ok())
+            {
+                let state_path = entry
+                    .path()
+                    .join(".ralph")
+                    .join("projects")
+                    .join("issue-60")
+                    .join("state.json");
+                if state_path.exists() {
+                    let content =
+                        fs::read_to_string(&state_path).expect("read worktree state.json");
+                    let loaded: serde_json::Value =
+                        serde_json::from_str(&content).expect("parse state");
+                    assert_eq!(
+                        loaded["status"], "in_progress",
+                        "status should be reset to in_progress"
+                    );
+                    assert_eq!(
+                        loaded["quick_dev_phase"], "plan_and_implement",
+                        "quick_dev_phase should be plan_and_implement"
+                    );
+                    assert_eq!(
+                        loaded["quick_dev_review_iteration"], 0,
+                        "quick_dev_review_iteration must be reset to 0, not stale value"
+                    );
+                    assert_eq!(
+                        loaded["quick_dev_final_review_attempts"], 0,
+                        "quick_dev_final_review_attempts must be reset to 0, not stale value"
+                    );
+                    assert_eq!(
+                        loaded["phase_iteration"], 1,
+                        "phase_iteration must be normalized to 1"
+                    );
+                    return; // found and verified
+                }
+            }
+        }
+
+        // If worktree wasn't found, check stderr for dispatch attempt as minimum.
+        assert!(
+            stderr.contains("pr-review: dispatched task"),
+            "dispatch should have been attempted even if worktree is hard to locate"
+        );
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -933,6 +1071,78 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .expect("git commit");
 
     // Switch back to master.
+    Command::new("git")
+        .args(["checkout", "master"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git checkout master");
+}
+
+/// Like `setup_project_branch` with `is_quick=true`, but writes non-zero
+/// `quick_dev_review_iteration` and `quick_dev_final_review_attempts` to
+/// simulate a previously force-completed quick-dev project with stale counters.
+fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32) {
+    let branch = format!("ralph/issue-{issue_number}");
+    let project_id = format!("issue-{issue_number}");
+
+    Command::new("git")
+        .args(["branch", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git branch");
+
+    Command::new("git")
+        .args(["checkout", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git checkout branch");
+
+    let project_dir = repo_root
+        .join(".ralph")
+        .join("projects")
+        .join(&project_id);
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    fs::write(
+        project_dir.join("prompt.md"),
+        "# Test prompt\nImplement the feature.",
+    )
+    .expect("write prompt.md");
+
+    // State has non-zero retry counters (stale from previous force-complete).
+    let state = serde_json::json!({
+        "project_id": project_id,
+        "project_name": "test",
+        "status": "completed",
+        "current_phase": "completing",
+        "quick_dev_phase": null,
+        "current_loop": 1,
+        "phase_iteration": 5,
+        "quick_dev_review_iteration": 3,
+        "quick_dev_final_review_attempts": 2,
+        "prompt_file": "prompt.md",
+        "parent_project": null,
+        "loops": [],
+        "completion_attempts": [],
+        "created_at": "2024-01-01T00:00:00Z"
+    });
+    fs::write(
+        project_dir.join("state.json"),
+        serde_json::to_string_pretty(&state).unwrap(),
+    )
+    .expect("write state.json");
+
+    Command::new("git")
+        .args(["add", ".ralph/"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "add project files with stale counters"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git commit");
+
     Command::new("git")
         .args(["checkout", "master"])
         .current_dir(repo_root)
