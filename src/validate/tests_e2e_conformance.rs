@@ -10,13 +10,6 @@ use crate::validate::mock_scripts::{
 };
 use serde_json::json;
 
-/// Mutex that guards process-global env mutations (`PATH`, `RALPH_E2E_GH_LOG`)
-/// in conformance tests so parallel execution doesn't race.
-fn env_mutex() -> &'static std::sync::Mutex<()> {
-    static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    MUTEX.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 /// RAII guard that restores an env var to its previous state on drop,
 /// ensuring cleanup even on panic.
 struct EnvGuard {
@@ -567,7 +560,9 @@ fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
         // Call create_pr_with_body_file via the runtime.
         // Env mutations are protected by a mutex + RAII guard to prevent
         // cross-test interference under parallel execution.
-        let _env_lock = env_mutex().lock().expect("env mutex");
+        let _env_lock = crate::validate::process_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _path_guard = EnvGuard::set("PATH", &composed);
         let _gh_log_guard = EnvGuard::set("RALPH_E2E_GH_LOG", &gh_log.to_string_lossy());
 

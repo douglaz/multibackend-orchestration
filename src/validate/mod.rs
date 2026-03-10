@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use clap::Args;
 
@@ -44,6 +45,11 @@ mod tests_tail;
 mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
+
+pub(crate) fn process_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Args, Clone)]
 pub struct ValidateArgs {
