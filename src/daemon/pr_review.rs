@@ -27,14 +27,32 @@ pub struct PrReviewState {
 }
 
 impl PrReviewState {
-    pub fn load(workspace_root: &Path, task_id: &str) -> Self {
+    /// Load persisted dedup state. Returns `Ok(default)` when the file does
+    /// not yet exist (first run). Returns `Err` on I/O errors or corrupt JSON
+    /// so that callers can surface the problem rather than silently resetting
+    /// dedup state to empty (which would cause duplicate amendment re-enqueue).
+    pub fn load(workspace_root: &Path, task_id: &str) -> Result<Self> {
         let path = state_path(workspace_root, task_id);
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(RalphError::Orchestration(format!(
+                    "failed to read pr-review state {}: {err}",
+                    path.display()
+                )));
+            }
+        };
+        serde_json::from_str(&content).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "corrupted pr-review state at {} (refusing to reset to empty): {err}",
+                path.display()
+            ))
+        })
     }
 
+    /// Persist dedup state via atomic temp-file + rename so a crash mid-write
+    /// cannot leave a truncated/corrupt file that would reset dedup state.
     pub fn save(&self, workspace_root: &Path, task_id: &str) -> Result<()> {
         let path = state_path(workspace_root, task_id);
         if let Some(parent) = path.parent() {
@@ -47,8 +65,21 @@ impl PrReviewState {
         let json = serde_json::to_string_pretty(self).map_err(|err| {
             RalphError::Orchestration(format!("failed to serialize pr-review state: {err}"))
         })?;
-        fs::write(&path, json).map_err(|err| {
-            RalphError::Orchestration(format!("failed to write pr-review state: {err}"))
+
+        // Write to a temp file in the same directory, then atomically rename.
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, &json).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to write pr-review state tmp {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        fs::rename(&tmp_path, &path).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to rename pr-review state {} -> {}: {err}",
+                tmp_path.display(),
+                path.display()
+            ))
         })?;
         Ok(())
     }
@@ -499,17 +530,26 @@ pub async fn poll_pr_reviews(
         };
 
         // Load dedup state.
-        let mut state = PrReviewState::load(&config.workspace_root, &task_info.task_id);
+        let mut state = match PrReviewState::load(&config.workspace_root, &task_info.task_id) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!(
+                    "warning: skipping PR review polling for {}: {err}",
+                    task_info.task_id
+                );
+                continue;
+            }
+        };
         let mut new_count = 0u32;
 
         for comment in &comments {
-            // Skip self-comments.
-            if comment.author == self_login {
+            // Skip self-comments (case-insensitive — GitHub logins are case-insensitive).
+            if comment.author.eq_ignore_ascii_case(&self_login) {
                 continue;
             }
 
-            // Skip non-whitelisted users.
-            if !whitelist.iter().any(|w| w == &comment.author) {
+            // Skip non-whitelisted users (case-insensitive).
+            if !whitelist.iter().any(|w| w.eq_ignore_ascii_case(&comment.author)) {
                 continue;
             }
 
@@ -666,7 +706,7 @@ mod tests {
 
         state.save(ws_root, task_id).expect("save");
 
-        let loaded = PrReviewState::load(ws_root, task_id);
+        let loaded = PrReviewState::load(ws_root, task_id).expect("load state");
         assert_eq!(loaded.processed_keys, state.processed_keys);
     }
 
@@ -690,7 +730,7 @@ mod tests {
             PrReviewComment {
                 id: 1,
                 endpoint: CommentEndpoint::IssueComment,
-                author: "alice".to_string(),
+                author: "Alice".to_string(), // different case — should still match
                 body: "fix this".to_string(),
                 path: None,
                 line: None,
@@ -708,7 +748,7 @@ mod tests {
             PrReviewComment {
                 id: 3,
                 endpoint: CommentEndpoint::IssueComment,
-                author: "bob".to_string(),
+                author: "BOB".to_string(), // different case — should still match
                 body: "looks good".to_string(),
                 path: None,
                 line: None,
@@ -719,14 +759,14 @@ mod tests {
         let self_login = "ralph-bot";
         let filtered: Vec<_> = comments
             .iter()
-            .filter(|c| c.author != self_login)
-            .filter(|c| whitelist.iter().any(|w| w == &c.author))
+            .filter(|c| !c.author.eq_ignore_ascii_case(self_login))
+            .filter(|c| whitelist.iter().any(|w| w.eq_ignore_ascii_case(&c.author)))
             .filter(|c| !c.body.trim().is_empty())
             .collect();
 
         assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].author, "alice");
-        assert_eq!(filtered[1].author, "bob");
+        assert_eq!(filtered[0].author, "Alice");
+        assert_eq!(filtered[1].author, "BOB");
     }
 
     #[test]
@@ -735,14 +775,14 @@ mod tests {
         let comment = PrReviewComment {
             id: 1,
             endpoint: CommentEndpoint::IssueComment,
-            author: "ralph-bot".to_string(),
+            author: "Ralph-Bot".to_string(), // different case
             body: "automated comment".to_string(),
             path: None,
             line: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
         };
 
-        assert_eq!(comment.author, self_login);
+        assert!(comment.author.eq_ignore_ascii_case(self_login));
     }
 
     #[test]

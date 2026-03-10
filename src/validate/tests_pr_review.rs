@@ -135,7 +135,7 @@ fn whitelist_filters_comments(h: &RalphHarness) -> TestResult {
         );
 
         // Verify dedup state persisted.
-        let state = PrReviewState::load(&ws_root, "acme-widgets-42");
+        let state = PrReviewState::load(&ws_root, "acme-widgets-42").expect("load dedup state");
         assert_eq!(
             state.processed_keys.len(),
             3,
@@ -301,7 +301,7 @@ fn dedup_across_restart(h: &RalphHarness) -> TestResult {
         assert_eq!(count_after_first, 1, "should have 1 staged amendment after first tick");
 
         // Verify dedup state persisted.
-        let state = PrReviewState::load(&ws_root, "acme-widgets-10");
+        let state = PrReviewState::load(&ws_root, "acme-widgets-10").expect("load dedup state");
         assert!(
             state.processed_keys.contains("issue_comment:500"),
             "dedup key should be persisted after first tick"
@@ -558,8 +558,9 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
 }
 
 /// Set up a completed project with staged amendments, then run a daemon tick
-/// where dispatch will fail (mock gh `repo clone` returns error).  Assert that
-/// staged amendments are preserved and the label is reverted to `ralph:completed`.
+/// where dispatch will fail (worktree path is blocked by a regular file).
+/// Assert that staged amendments are preserved and the label is reverted to
+/// `ralph:completed`.
 fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh =
@@ -599,8 +600,19 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         )
         .expect("write staged amendment");
 
-        // Use a mock gh that makes `repo clone` fail, causing dispatch to error.
-        let gh_path = write_dispatch_failure_mock_gh(&dh).expect("write failing mock gh");
+        // Block worktree creation by placing a regular file at the expected
+        // worktree path.  `create_worktree` checks `wt_path.exists()` and
+        // then calls `verify_worktree_branch`, which fails because the path
+        // is a file, not a git worktree directory.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        fs::create_dir_all(&worktrees_dir).expect("create worktrees dir");
+        fs::write(
+            worktrees_dir.join("acme-widgets-42"),
+            "blocker — not a worktree",
+        )
+        .expect("create worktree blocker");
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
         let label_log = dh.temp_dir.path().join("fail_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1128,18 +1140,20 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
     let project_id = format!("issue-{issue_number}");
 
     // Create branch from current HEAD.
-    Command::new("git")
+    let branch_out = Command::new("git")
         .args(["branch", &branch])
         .current_dir(repo_root)
         .output()
         .expect("git branch");
+    assert!(branch_out.status.success(), "git branch failed: {}", String::from_utf8_lossy(&branch_out.stderr));
 
     // Checkout branch, add project files, commit, checkout back.
-    Command::new("git")
+    let checkout_out = Command::new("git")
         .args(["checkout", &branch])
         .current_dir(repo_root)
         .output()
         .expect("git checkout branch");
+    assert!(checkout_out.status.success(), "git checkout branch failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
 
     let project_dir = repo_root
         .join(".ralph")
@@ -1177,24 +1191,41 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
     )
     .expect("write state.json");
 
-    // Commit all project files.
-    Command::new("git")
-        .args(["add", ".ralph/"])
+    // Commit only project-specific files (not all of .ralph/) to avoid
+    // removing workspace config files (e.g. ralph.toml) when switching
+    // back to master.
+    let project_rel = format!(".ralph/projects/{project_id}/");
+    let add_out = Command::new("git")
+        .args(["add", &project_rel])
         .current_dir(repo_root)
         .output()
         .expect("git add");
-    Command::new("git")
+    assert!(add_out.status.success(), "git add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+
+    let commit_out = Command::new("git")
         .args(["commit", "-m", "add project files for test"])
         .current_dir(repo_root)
         .output()
         .expect("git commit");
+    assert!(commit_out.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit_out.stderr));
+
+    // Push to origin so that sync_project_branch finds the remote branch
+    // and does not force-reset it to origin/master (which would wipe out
+    // the project files).
+    let push_out = Command::new("git")
+        .args(["push", "origin", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git push origin");
+    assert!(push_out.status.success(), "git push failed: {}", String::from_utf8_lossy(&push_out.stderr));
 
     // Switch back to master.
-    Command::new("git")
+    let checkout_out = Command::new("git")
         .args(["checkout", "master"])
         .current_dir(repo_root)
         .output()
         .expect("git checkout master");
+    assert!(checkout_out.status.success(), "git checkout master failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
 }
 
 /// Like `setup_project_branch` with `is_quick=true`, but writes non-zero
@@ -1204,17 +1235,19 @@ fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32)
     let branch = format!("ralph/issue-{issue_number}");
     let project_id = format!("issue-{issue_number}");
 
-    Command::new("git")
+    let branch_out = Command::new("git")
         .args(["branch", &branch])
         .current_dir(repo_root)
         .output()
         .expect("git branch");
+    assert!(branch_out.status.success(), "git branch failed: {}", String::from_utf8_lossy(&branch_out.stderr));
 
-    Command::new("git")
+    let checkout_out = Command::new("git")
         .args(["checkout", &branch])
         .current_dir(repo_root)
         .output()
         .expect("git checkout branch");
+    assert!(checkout_out.status.success(), "git checkout branch failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
 
     let project_dir = repo_root
         .join(".ralph")
@@ -1251,22 +1284,38 @@ fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32)
     )
     .expect("write state.json");
 
-    Command::new("git")
-        .args(["add", ".ralph/"])
+    // Commit only project-specific files (not all of .ralph/) to avoid
+    // removing workspace config files when switching back to master.
+    let project_rel = format!(".ralph/projects/{project_id}/");
+    let add_out = Command::new("git")
+        .args(["add", &project_rel])
         .current_dir(repo_root)
         .output()
         .expect("git add");
-    Command::new("git")
+    assert!(add_out.status.success(), "git add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+
+    let commit_out = Command::new("git")
         .args(["commit", "-m", "add project files with stale counters"])
         .current_dir(repo_root)
         .output()
         .expect("git commit");
+    assert!(commit_out.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit_out.stderr));
 
-    Command::new("git")
+    // Push to origin so that sync_project_branch finds the remote branch
+    // and does not force-reset it to origin/master.
+    let push_out = Command::new("git")
+        .args(["push", "origin", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git push origin");
+    assert!(push_out.status.success(), "git push failed: {}", String::from_utf8_lossy(&push_out.stderr));
+
+    let checkout_out = Command::new("git")
         .args(["checkout", "master"])
         .current_dir(repo_root)
         .output()
         .expect("git checkout master");
+    assert!(checkout_out.status.success(), "git checkout master failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
 }
 
 /// Set up a minimal mock backend so that dispatch_task can spawn a child process.
@@ -1298,143 +1347,3 @@ fn setup_mock_backend(dh: &RalphHarness) {
         .expect("set openrouter args");
 }
 
-/// Write a mock gh script identical to `write_pr_review_mock_gh` except that
-/// `repo clone` returns an error, causing `dispatch_task` to fail.
-fn write_dispatch_failure_mock_gh(h: &RalphHarness) -> crate::Result<String> {
-    let script = h.write_mock_script(
-        "gh",
-        r###"#!/bin/sh
-# Mock gh that fails on repo clone to simulate dispatch failure.
-
-case "$1" in
-  issue)
-    case "$2" in
-      list)
-        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
-          printf '%s' "$MOCK_GH_ISSUES"
-        else
-          printf '[]'
-        fi
-        exit 0
-        ;;
-      edit)
-        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
-          echo "$@" >> "$MOCK_GH_LABEL_LOG"
-        fi
-        exit 0
-        ;;
-      view)
-        want_labels=0
-        want_title_body=0
-        for arg in "$@"; do
-          if [ "$arg" = "labels" ]; then want_labels=1; fi
-          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
-        done
-        if [ "$want_labels" = "1" ]; then
-          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
-            printf '%s' "$MOCK_GH_ISSUE_LABELS"
-          else
-            printf '{"labels":[]}'
-          fi
-          exit 0
-        fi
-        if [ "$want_title_body" = "1" ]; then
-          issue_number="${3:-0}"
-          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
-          exit 0
-        fi
-        printf ''
-        exit 0
-        ;;
-      comment) exit 0 ;;
-      *) echo "mock gh: unhandled issue subcommand: $2" >&2; exit 1 ;;
-    esac
-    ;;
-  pr)
-    case "$2" in
-      list) printf ''; exit 0 ;;
-      create) printf 'https://github.com/acme/widgets/pull/1\n'; exit 0 ;;
-      edit) exit 0 ;;
-      *) echo "mock gh: unhandled pr subcommand: $2" >&2; exit 1 ;;
-    esac
-    ;;
-  api)
-    if [ "$2" = "user" ]; then
-      printf 'ralph-bot\n'
-      exit 0
-    fi
-    endpoint="$2"
-    has_jq=0
-    for arg in "$@"; do
-      if [ "$arg" = "--jq" ]; then has_jq=1; fi
-    done
-    case "$endpoint" in
-      repos/*/pulls/*/comments)
-        if [ -n "${MOCK_GH_PR_COMMENTS:-}" ]; then
-          printf '%s' "$MOCK_GH_PR_COMMENTS"
-        else
-          printf '[]'
-        fi
-        exit 0
-        ;;
-      repos/*/issues/*/comments)
-        if [ -n "${MOCK_GH_ISSUE_COMMENTS:-}" ]; then
-          printf '%s' "$MOCK_GH_ISSUE_COMMENTS"
-        else
-          printf '[]'
-        fi
-        exit 0
-        ;;
-      repos/*/pulls/*/reviews)
-        if [ -n "${MOCK_GH_REVIEWS:-}" ]; then
-          printf '%s' "$MOCK_GH_REVIEWS"
-        else
-          printf '[]'
-        fi
-        exit 0
-        ;;
-      repos/*/pulls/*)
-        if [ "$has_jq" = "1" ]; then
-          printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
-          exit 0
-        fi
-        printf '{"state":"%s"}' "${MOCK_GH_PR_STATE:-open}"
-        exit 0
-        ;;
-      *)
-        echo "mock gh: unhandled api endpoint: $endpoint" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-  label)
-    case "$2" in
-      create) exit 0 ;;
-      *) echo "mock gh: unhandled label subcommand: $2" >&2; exit 1 ;;
-    esac
-    ;;
-  repo)
-    case "$2" in
-      clone)
-        # Fail on clone to simulate dispatch failure.
-        echo "mock gh: simulated clone failure" >&2
-        exit 1
-        ;;
-      view) printf 'acme/widgets\n'; exit 0 ;;
-      *) echo "mock gh: unhandled repo subcommand: $2" >&2; exit 1 ;;
-    esac
-    ;;
-  *)
-    echo "mock gh: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###,
-    )?;
-    let base = script
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let existing = std::env::var("PATH").unwrap_or_default();
-    Ok(format!("{base}:{existing}"))
-}
