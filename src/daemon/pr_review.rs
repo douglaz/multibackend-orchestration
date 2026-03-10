@@ -405,9 +405,12 @@ pub struct PrReviewPollResult {
 /// Poll all PR-backed tasks for new review comments from whitelisted users.
 ///
 /// Returns a list of tasks that received new amendments.
+/// The `pr_open_cache` is populated with PR-open state discovered during polling
+/// so that callers (e.g. `pr_review_phase`) can reuse it without redundant API calls.
 pub async fn poll_pr_reviews(
     config: &DaemonRuntimeConfig,
     children: &HashMap<u32, TaskHandle>,
+    pr_open_cache: &mut HashMap<u32, bool>,
 ) -> Result<Vec<PrReviewPollResult>> {
     let whitelist = &config.pr_review_whitelist;
     if whitelist.is_empty() {
@@ -437,22 +440,29 @@ pub async fn poll_pr_reviews(
             continue;
         }
 
-        // Check if PR is still open.
-        let is_open = match github::is_pr_open(
-            &config.owner,
-            &config.repo,
-            task_info.pr_number,
-            &config.gh_bin,
-        )
-        .await
-        {
-            Ok(open) => open,
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to check PR #{} state for {}: {err}",
-                    task_info.pr_number, task_info.task_id
-                );
-                continue;
+        // Check if PR is still open (use/populate shared cache).
+        let is_open = match pr_open_cache.get(&task_info.pr_number) {
+            Some(&cached) => cached,
+            None => {
+                let open = match github::is_pr_open(
+                    &config.owner,
+                    &config.repo,
+                    task_info.pr_number,
+                    &config.gh_bin,
+                )
+                .await
+                {
+                    Ok(open) => open,
+                    Err(err) => {
+                        eprintln!(
+                            "warning: failed to check PR #{} state for {}: {err}",
+                            task_info.pr_number, task_info.task_id
+                        );
+                        continue;
+                    }
+                };
+                pr_open_cache.insert(task_info.pr_number, open);
+                open
             }
         };
 

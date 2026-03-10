@@ -1202,6 +1202,7 @@ async fn poll_and_claim(
                     &claimed.raw_idea,
                     &claimed.issue_labels,
                     &repo_root_lock,
+                    DispatchOrigin::Claim,
                 )
                 .await
             });
@@ -1359,6 +1360,15 @@ fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
     Ok(())
 }
 
+/// Origin of a dispatch call, used to scope PR-review-specific logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOrigin {
+    /// Normal claim flow (poll_and_claim).
+    Claim,
+    /// PR-review resume flow (pr_review_phase).
+    PrReviewResume,
+}
+
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
 async fn dispatch_task(
     config: &DaemonRuntimeConfig,
@@ -1366,6 +1376,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
+    origin: DispatchOrigin,
 ) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
@@ -1444,7 +1455,9 @@ async fn dispatch_task(
 
     // Drain any staged PR review amendments into the project's amendment queue,
     // and reset project state so the orchestrator doesn't short-circuit on Completed.
-    {
+    // Only runs for PR-review resume dispatches to avoid accidentally touching
+    // staged amendments during normal claim flow.
+    let drained_count = if origin == DispatchOrigin::PrReviewResume {
         let ws = config.workspace_root.clone();
         let tid = task_id.clone();
         let pid = project_id.clone();
@@ -1469,7 +1482,10 @@ async fn dispatch_task(
                 "dispatch: drained {drained} staged PR review amendment(s) for {task_id}"
             );
         }
-    }
+        drained
+    } else {
+        0
+    };
 
     if resume_existing_project {
         eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
@@ -1753,8 +1769,10 @@ async fn dispatch_task(
 
     // Staged amendment files were copied (not moved) during drain — now that
     // spawn succeeded, purge the originals so they are not re-drained on a
-    // future cycle.
-    super::pr_review::purge_staged_amendments(&config.workspace_root, &task_id);
+    // future cycle.  Only purge when we actually drained amendments.
+    if drained_count > 0 {
+        super::pr_review::purge_staged_amendments(&config.workspace_root, &task_id);
+    }
 
     eprintln!("dispatched task {task_id} (in-process)");
 
@@ -2482,8 +2500,12 @@ async fn pr_review_phase(
     children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
+    // Per-cycle cache for PR open state shared between polling and dispatch phases
+    // to avoid redundant GitHub API calls for the same PR.
+    let mut pr_open_cache: HashMap<u32, bool> = HashMap::new();
+
     let poll_results =
-        super::pr_review::poll_pr_reviews(config, children).await?;
+        super::pr_review::poll_pr_reviews(config, children, &mut pr_open_cache).await?;
 
     // Build the set of task_ids that received new amendments this cycle.
     let newly_staged: std::collections::HashSet<String> = poll_results
@@ -2506,21 +2528,15 @@ async fn pr_review_phase(
         pr_number: u32,
     }
 
-    // Per-cycle cache for PR open state to avoid duplicate API calls.
-    let mut pr_open_cache: HashMap<u32, bool> = HashMap::new();
-
-    // poll_results candidates are known-open (poll_pr_reviews already checked).
+    // poll_results candidates are known-open (poll_pr_reviews already checked and
+    // populated the cache).
     let mut candidates: Vec<DispatchCandidate> = Vec::new();
     for r in &poll_results {
-        // Cache the open state — poll_pr_reviews only processes open PRs.
         let pr_num = all_tasks
             .iter()
             .find(|t| t.task_id == r.task_id)
             .map(|t| t.pr_number)
             .unwrap_or(0);
-        if pr_num > 0 {
-            pr_open_cache.insert(pr_num, true);
-        }
         candidates.push(DispatchCandidate {
             task_id: r.task_id.clone(),
             issue_number: r.issue_number,
@@ -2647,7 +2663,7 @@ async fn pr_review_phase(
 
         // Dispatch the task. State reset and amendment drain happen inside dispatch_task
         // after worktree creation and before task spawn.
-        match dispatch_task(config, candidate.issue_number, &raw_idea, &labels, repo_root_lock)
+        match dispatch_task(config, candidate.issue_number, &raw_idea, &labels, repo_root_lock, DispatchOrigin::PrReviewResume)
             .await
         {
             Ok(handle) => {
