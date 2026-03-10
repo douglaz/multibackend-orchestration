@@ -18,8 +18,8 @@ use crate::git::commit::{
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
 use crate::project::artifacts::{
-    resolve_artifact_path_by_suffix, strip_backend_frontmatter, write_artifact,
-    write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+    resolve_artifact_path_by_suffix, resolve_artifact_path_by_suffixes, strip_backend_frontmatter,
+    write_artifact, write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
 use crate::project::lifecycle::reconstruct_project_state;
@@ -294,6 +294,10 @@ impl QuickDevOrchestrator {
             last_review_feedback = load_latest_review_feedback(project_dir, loop_number, loop_slug);
         }
         if matches!(current_qd_phase, QuickDevPhase::PlanAndImplement) {
+            // On a first-pass PlanAndImplement run there are no final-review
+            // artifacts yet, so this reconstructs an empty handoff. On resume
+            // after a final-review reloop, it restores the blocking findings
+            // from disk for crash-safe closure work.
             last_final_review_feedback =
                 load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
         }
@@ -966,8 +970,10 @@ impl QuickDevOrchestrator {
                         });
                     }
 
-                    // Issues found: capture the handoff before re-entering
-                    // PlanAndImplement, then increment the retry counter.
+                    // Issues found: reload the handoff synchronously from the
+                    // artifacts written above before re-entering
+                    // PlanAndImplement. Keep this coupled to the writes so a
+                    // resumed run sees the exact persisted findings.
                     last_final_review_feedback =
                         load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
                     final_review_attempts += 1;
@@ -1211,12 +1217,33 @@ fn load_latest_final_review_feedback(
     let mut sections = Vec::new();
 
     for role in ["implementer", "reviewer"] {
-        let suffix = ArtifactKind::QuickDevFinalReview {
+        let issues_suffix = ArtifactKind::QuickDevFinalReview {
             role: role.to_owned(),
             complete: false,
         }
         .file_name();
-        let body = load_latest_artifact_body(project_dir, loop_number, loop_slug, &suffix);
+        let complete_suffix = ArtifactKind::QuickDevFinalReview {
+            role: role.to_owned(),
+            complete: true,
+        }
+        .file_name();
+        let artifact_rel = match resolve_artifact_path_by_suffixes(
+            project_dir,
+            loop_number,
+            loop_slug,
+            &[issues_suffix.as_str(), complete_suffix.as_str()],
+        ) {
+            Ok(Some(rel)) => rel,
+            _ => continue,
+        };
+        if artifact_rel.ends_with(&complete_suffix) {
+            continue;
+        }
+        let artifact_path = project_dir.join(&artifact_rel);
+        let body = match fs::read_to_string(&artifact_path) {
+            Ok(content) => strip_backend_frontmatter(&content),
+            Err(_) => String::new(),
+        };
         if body.trim().is_empty() {
             continue;
         }
@@ -1390,6 +1417,7 @@ fn build_plan_implement_prompt(
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
+    let final_review_handoff = final_review_handoff.trim();
     vars.insert(
         "system_guardrails".to_owned(),
         QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned(),
@@ -1397,10 +1425,14 @@ fn build_plan_implement_prompt(
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert(
         "final_review_handoff".to_owned(),
-        if final_review_handoff.trim().is_empty() {
-            "None.".to_owned()
+        final_review_handoff.to_owned(),
+    );
+    vars.insert(
+        "final_review_handoff_section".to_owned(),
+        if final_review_handoff.is_empty() {
+            String::new()
         } else {
-            final_review_handoff.to_owned()
+            format!("## Final Review Handoff\n{final_review_handoff}\n")
         },
     );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
@@ -2000,6 +2032,36 @@ mod tests {
     }
 
     #[test]
+    fn load_latest_final_review_feedback_skips_roles_closed_by_newer_complete() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path();
+        let loop_dir = project_dir.join("loops/001-quick-dev");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nStale implementer issue\n",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260310100002-quick-dev-final-review-implementer-complete.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: NO AMENDMENTS\n\nClosed implementer issue\n",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
+        )
+        .unwrap();
+
+        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
+        assert!(!handoff.contains("Stale implementer issue"));
+        assert!(!handoff.contains("Implementer Final Review Findings"));
+        assert!(handoff.contains("Reviewer Final Review Findings"));
+        assert!(handoff.contains("Reviewer issue body"));
+    }
+
+    #[test]
     fn build_plan_implement_prompt_includes_final_review_handoff() {
         let effective = make_test_effective(
             Some("claude".to_owned()),
@@ -2017,6 +2079,21 @@ mod tests {
 
         assert!(prompt.contains("final review handoff body"));
         assert!(prompt.contains("Fix the root cause, not just the reported symptom"));
+    }
+
+    #[test]
+    fn build_plan_implement_prompt_omits_empty_final_review_handoff_section() {
+        let effective = make_test_effective(
+            Some("claude".to_owned()),
+            Some("codex".to_owned()),
+            "claude".to_owned(),
+        );
+        let prompt =
+            build_plan_implement_prompt(&effective, "master prompt", "spec body", "", "diff body")
+                .unwrap();
+
+        assert!(!prompt.contains("## Final Review Handoff"));
+        assert!(!prompt.contains("None."));
     }
 
     // Helper to build a minimal EffectiveConfig for testing

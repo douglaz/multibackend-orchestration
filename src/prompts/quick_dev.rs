@@ -62,8 +62,7 @@ CRITICAL FORMAT REQUIREMENTS:
 ## Feature Specification
 {{feature_spec}}
 
-## Final Review Handoff
-{{final_review_handoff}}
+{{final_review_handoff_section}}
 
 ## Master Prompt
 {{master_prompt}}
