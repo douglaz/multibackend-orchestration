@@ -980,7 +980,7 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 ## Could Not Address
 - None
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -1007,7 +1007,7 @@ if grep -q "quick-dev reviewer" <<< "$INPUT"; then
 
 Implementation is acceptable.
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -1477,7 +1477,7 @@ ACCEPT
 ### Rationale
 Amendment is valid.
 EOF
-elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   COUNT=0
   if [ -f "$FINAL_REVIEWER_COUNTER" ]; then
     COUNT="$(cat "$FINAL_REVIEWER_COUNTER")"
@@ -1663,7 +1663,7 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 ## Could Not Address
 - None
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -1691,7 +1691,7 @@ if grep -q "quick-dev reviewer" <<< "$INPUT"; then
 
 Implementation is acceptable.
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
