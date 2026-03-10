@@ -81,6 +81,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::transient_api_error_preserves_staged",
             func: transient_api_error_preserves_staged,
         },
+        ConformanceTest {
+            name: "pr_review::corrupt_metadata_preserves_staged",
+            func: corrupt_metadata_preserves_staged,
+        },
     ]
 }
 
@@ -2066,6 +2070,115 @@ fn transient_api_error_preserves_staged(h: &RalphHarness) -> TestResult {
         assert!(
             !stderr.contains("dispatched task acme-widgets-42"),
             "issue should not have been dispatched after transient error; stderr: {stderr}"
+        );
+    })
+}
+
+/// Verify that corrupt task metadata does NOT trigger clearing of staged
+/// amendments.  The claim path should defer (skip) the issue for this cycle
+/// instead of treating it as "metadata missing" and deleting artifacts.
+fn corrupt_metadata_preserves_staged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Configure whitelist so the PR-review guard in poll_and_claim is active.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+
+        // Write CORRUPT task metadata (invalid JSON).
+        let tasks_dir = ws_root.join("daemon").join("tasks");
+        fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+        fs::write(
+            tasks_dir.join("acme-widgets-42.json"),
+            "{ this is not valid json!!!",
+        )
+        .expect("write corrupt task metadata");
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Set the resume-pending marker.
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue appears as ralph:ready in the issue list, so poll_and_claim
+        // would normally try to claim it.
+        let issues_json =
+            r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues_json),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify warning about corrupt metadata was logged.
+        assert!(
+            stderr.contains("corrupt task metadata") || stderr.contains("deferring claim"),
+            "stderr should log corrupt metadata warning, got: {stderr}"
+        );
+
+        // Staged amendments MUST be preserved (not cleared).
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved when task metadata is corrupt"
+        );
+
+        // Resume-pending marker MUST be preserved.
+        assert!(
+            has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker must be preserved when task metadata is corrupt"
+        );
+
+        // The issue should NOT have been claimed (no label swap).
+        assert!(
+            !stderr.contains("dispatched task acme-widgets-42"),
+            "issue should not have been dispatched with corrupt metadata; stderr: {stderr}"
         );
     })
 }

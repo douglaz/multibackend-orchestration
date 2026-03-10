@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::daemon::github::{
     self, extract_pr_number, CommentEndpoint, PrReviewComment,
@@ -598,8 +598,9 @@ pub async fn poll_pr_reviews(
         match github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).await {
             Ok(login) => login,
             Err(err) => {
-                eprintln!("warning: failed to resolve authenticated GitHub login for PR review polling: {err}");
-                return Ok(Vec::new());
+                return Err(RalphError::Orchestration(format!(
+                    "failed to resolve authenticated GitHub login for PR review polling: {err}"
+                )));
             }
         };
 
@@ -677,6 +678,8 @@ pub async fn poll_pr_reviews(
             }
         };
         let mut new_count = 0u32;
+        let mut consecutive_save_failures = 0u32;
+        const MAX_CONSECUTIVE_SAVE_FAILURES: u32 = 3;
 
         for comment in &comments {
             // Skip self-comments (case-insensitive — GitHub logins are case-insensitive).
@@ -716,10 +719,13 @@ pub async fn poll_pr_reviews(
             // Persist dedup state incrementally after each staged amendment so
             // that a crash/error after staging won't cause re-enqueue next cycle.
             if let Err(err) = state.save(&config.workspace_root, &task_info.task_id) {
-                eprintln!(
-                    "warning: failed to persist PR review dedup state for {}: {err}; \
-                     reverting staged amendment to avoid dedup violation",
-                    task_info.task_id
+                consecutive_save_failures += 1;
+                warn!(
+                    task_id = %task_info.task_id,
+                    consecutive_failures = consecutive_save_failures,
+                    error = %err,
+                    "failed to persist PR review dedup state; \
+                     reverting staged amendment to avoid dedup violation"
                 );
                 // Revert: remove the staged file and in-memory key so the
                 // comment retries cleanly on the next poll cycle without
@@ -734,13 +740,25 @@ pub async fn poll_pr_reviews(
                 let staged_path = staging_dir(&config.workspace_root, &task_info.task_id)
                     .join(staged_filename);
                 if let Err(rm_err) = fs::remove_file(&staged_path) {
-                    eprintln!(
-                        "warning: failed to remove staged amendment {}: {rm_err}",
-                        staged_path.display()
+                    warn!(
+                        task_id = %task_info.task_id,
+                        path = %staged_path.display(),
+                        error = %rm_err,
+                        "failed to remove staged amendment during dedup-state save rollback"
                     );
+                }
+                if consecutive_save_failures >= MAX_CONSECUTIVE_SAVE_FAILURES {
+                    warn!(
+                        task_id = %task_info.task_id,
+                        "skipping remaining comments for task after {MAX_CONSECUTIVE_SAVE_FAILURES} \
+                         consecutive dedup-state save failures; investigate I/O issue on state file"
+                    );
+                    break;
                 }
                 continue;
             }
+            // Reset on successful save.
+            consecutive_save_failures = 0;
 
             info!(
                 task_id = %task_info.task_id,

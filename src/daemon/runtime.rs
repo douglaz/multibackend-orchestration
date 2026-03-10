@@ -725,6 +725,41 @@ pub fn load_task_metadata(workspace_root: &Path, task_id: &str) -> TaskMetadata 
     }
 }
 
+/// Result of a strict task metadata load that distinguishes missing files
+/// from corrupt/unreadable files.
+pub enum TaskMetadataLoadResult {
+    /// File exists and parsed successfully.
+    Ok(TaskMetadata),
+    /// File does not exist (definitively missing).
+    NotFound,
+    /// File exists but could not be read or parsed (transient/corrupt).
+    Error(String),
+}
+
+/// Load task metadata with strict error handling.
+///
+/// Unlike [`load_task_metadata`], this variant distinguishes `NotFound`
+/// (file absent) from parse/read errors so that callers can avoid
+/// destructive actions (e.g. clearing staged amendments) when the metadata
+/// file is corrupt rather than missing.
+pub fn load_task_metadata_strict(workspace_root: &Path, task_id: &str) -> TaskMetadataLoadResult {
+    let path = task_metadata_path(workspace_root, task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<TaskMetadata>(&content) {
+            Ok(meta) => TaskMetadataLoadResult::Ok(meta),
+            Err(err) => TaskMetadataLoadResult::Error(format!(
+                "corrupt task metadata at {}: {err}",
+                path.display()
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TaskMetadataLoadResult::NotFound,
+        Err(err) => TaskMetadataLoadResult::Error(format!(
+            "failed to read task metadata at {}: {err}",
+            path.display()
+        )),
+    }
+}
+
 /// Persist task metadata to disk (best-effort: logs on failure).
 ///
 /// Uses atomic temp-file + rename to prevent crash-interrupted writes from
@@ -1152,35 +1187,52 @@ async fn poll_and_claim(
             if has_marker_or_staged {
                 // Verify pr_review_phase can actually own this issue: task
                 // metadata must exist with a pr_url, and that PR must be open.
-                let meta = load_task_metadata(&config.workspace_root, &task_id);
+                //
+                // Use strict metadata loading to distinguish NotFound from
+                // corrupt/unreadable files.  Corrupt metadata must NOT cause
+                // clearing of staged amendments (data-loss risk).
+                let meta_result = load_task_metadata_strict(&config.workspace_root, &task_id);
                 // Tri-state: Some(true) = PR open, Some(false) = PR closed/missing,
                 // None = transient error (unknown).
-                let pr_check_result = if let Some(pr_url) = &meta.pr_url {
-                    if let Some(pr_number) = github::extract_pr_number(pr_url) {
-                        match github::is_pr_open(
-                            &config.owner,
-                            &config.repo,
-                            pr_number,
-                            &config.gh_bin,
-                        )
-                        .await
-                        {
-                            Ok(true) => Some(true),
-                            Ok(false) => Some(false),
-                            Err(err) => {
-                                eprintln!(
-                                    "warning: transient error checking PR state for issue #{}: {err}; \
-                                     deferring claim to avoid clearing staged amendments",
-                                    issue.number
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        Some(false)
+                let pr_check_result = match &meta_result {
+                    TaskMetadataLoadResult::Error(err) => {
+                        eprintln!(
+                            "warning: {err}; deferring claim for issue #{} to avoid \
+                             clearing staged amendments",
+                            issue.number
+                        );
+                        None
                     }
-                } else {
-                    Some(false)
+                    TaskMetadataLoadResult::NotFound => Some(false),
+                    TaskMetadataLoadResult::Ok(meta) => {
+                        if let Some(pr_url) = &meta.pr_url {
+                            if let Some(pr_number) = github::extract_pr_number(pr_url) {
+                                match github::is_pr_open(
+                                    &config.owner,
+                                    &config.repo,
+                                    pr_number,
+                                    &config.gh_bin,
+                                )
+                                .await
+                                {
+                                    Ok(true) => Some(true),
+                                    Ok(false) => Some(false),
+                                    Err(err) => {
+                                        eprintln!(
+                                            "warning: transient error checking PR state for issue #{}: {err}; \
+                                             deferring claim to avoid clearing staged amendments",
+                                            issue.number
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                Some(false)
+                            }
+                        } else {
+                            Some(false)
+                        }
+                    }
                 };
 
                 match pr_check_result {

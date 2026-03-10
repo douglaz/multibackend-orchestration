@@ -1287,56 +1287,115 @@ fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: 
 fn format_final_review_handoff(impl_body: &str, rev_body: &str) -> String {
     let mut handoff = String::from(
         "This implementation round was reopened by final review. Close every item below before treating the project as complete.\n\
-         For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n\
-         ### Reviewer Final Review Findings\n",
+         For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n",
     );
-    handoff.push_str(rev_body);
-    handoff.push_str("\n\n### Implementer Final Review Findings\n");
-    handoff.push_str(impl_body);
+    if !rev_body.trim().is_empty() {
+        handoff.push_str("### Reviewer Final Review Findings\n");
+        handoff.push_str(rev_body);
+        handoff.push('\n');
+    }
+    if !impl_body.trim().is_empty() {
+        handoff.push_str("\n### Implementer Final Review Findings\n");
+        handoff.push_str(impl_body);
+    }
     handoff
 }
 
 /// Load final-review findings from disk when resuming at PlanAndImplement
 /// after a FinalReview -> PlanAndImplement reloop.  This ensures the handoff
 /// survives process restarts.
+///
+/// For each role (reviewer, implementer), resolves both the `*-issues.md` and
+/// `*-complete.md` artifacts and compares their timestamps.  Findings are only
+/// included when the issues artifact is strictly newer than (or there is no)
+/// complete artifact.  This prevents stale old findings from reappearing if a
+/// prior issues round was later closed by a newer `*-complete.md` and the
+/// daemon restarts in a subsequent PlanAndImplement cycle.
 fn load_final_review_findings(
     project_dir: &Path,
     loop_number: u32,
     loop_slug: &str,
 ) -> Option<String> {
-    // Try to load findings from both the reviewer and implementer final-review
-    // artifacts.  The "issues" variants are written when the review finds problems.
-    let rev_suffix = ArtifactKind::QuickDevFinalReview {
-        role: "reviewer".to_owned(),
-        complete: false,
-    }
-    .file_name();
-    let impl_suffix = ArtifactKind::QuickDevFinalReview {
-        role: "implementer".to_owned(),
-        complete: false,
-    }
-    .file_name();
-
-    let rev_body = resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &rev_suffix)
-        .ok()
-        .flatten()
-        .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
-        .map(|c| strip_backend_frontmatter(&c))
-        .unwrap_or_default();
-
-    let impl_body =
-        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &impl_suffix)
-            .ok()
-            .flatten()
-            .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
-            .map(|c| strip_backend_frontmatter(&c))
-            .unwrap_or_default();
+    let rev_body = load_role_findings_if_latest(project_dir, loop_number, loop_slug, "reviewer");
+    let impl_body = load_role_findings_if_latest(project_dir, loop_number, loop_slug, "implementer");
 
     if rev_body.is_empty() && impl_body.is_empty() {
         return None;
     }
 
     Some(format_final_review_handoff(&impl_body, &rev_body))
+}
+
+/// Load final-review findings for a single role, but only if the latest
+/// artifact for that role is `*-issues.md` (not `*-complete.md`).
+///
+/// Returns the stripped body or an empty string if findings should not be
+/// included (complete artifact is newer or same timestamp, or no issues).
+fn load_role_findings_if_latest(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    role: &str,
+) -> String {
+    let issues_suffix = ArtifactKind::QuickDevFinalReview {
+        role: role.to_owned(),
+        complete: false,
+    }
+    .file_name();
+    let complete_suffix = ArtifactKind::QuickDevFinalReview {
+        role: role.to_owned(),
+        complete: true,
+    }
+    .file_name();
+
+    let issues_rel =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &issues_suffix)
+            .ok()
+            .flatten();
+    let complete_rel =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &complete_suffix)
+            .ok()
+            .flatten();
+
+    // If there is a complete artifact, only include issues when the issues
+    // artifact has a strictly newer timestamp.  Ties go to complete
+    // (conservative: if they were written at the same second, the review
+    // round was closed).
+    if let (Some(issues_path), Some(complete_path)) = (&issues_rel, &complete_rel) {
+        let issues_ts = extract_artifact_timestamp(issues_path);
+        let complete_ts = extract_artifact_timestamp(complete_path);
+        match (issues_ts, complete_ts) {
+            (Some(it), Some(ct)) if it > ct => {
+                // Issues artifact is newer → include findings.
+            }
+            (Some(_), Some(_)) => {
+                // Complete is newer or same timestamp → suppress.
+                return String::new();
+            }
+            _ => {
+                // Missing timestamps — fall through to include issues if present.
+            }
+        }
+    }
+
+    issues_rel
+        .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
+        .map(|c| strip_backend_frontmatter(&c))
+        .unwrap_or_default()
+}
+
+/// Extract the numeric timestamp prefix from an artifact relative path.
+///
+/// Artifact paths look like `loops/001-slug/20260310123456-suffix.md`.
+/// Returns the timestamp string if present.
+fn extract_artifact_timestamp(rel_path: &str) -> Option<&str> {
+    let file_name = rel_path.rsplit('/').next()?;
+    let (prefix, _) = file_name.split_once('-')?;
+    if prefix.len() == 14 && prefix.chars().all(|c| c.is_ascii_digit()) {
+        Some(prefix)
+    } else {
+        None
+    }
 }
 
 /// Persist project state to `state.json` using atomic write semantics:
@@ -2196,5 +2255,141 @@ mod tests {
         assert!(handoff.contains("impl bug report"));
         assert!(handoff.contains("### Reviewer Final Review Findings"));
         assert!(handoff.contains("### Implementer Final Review Findings"));
+    }
+
+    #[test]
+    fn format_handoff_omits_empty_reviewer_section() {
+        let handoff = format_final_review_handoff("impl findings here", "");
+        assert!(
+            !handoff.contains("### Reviewer Final Review Findings"),
+            "empty reviewer section should be omitted"
+        );
+        assert!(handoff.contains("### Implementer Final Review Findings"));
+        assert!(handoff.contains("impl findings here"));
+    }
+
+    #[test]
+    fn format_handoff_omits_empty_implementer_section() {
+        let handoff = format_final_review_handoff("", "reviewer findings here");
+        assert!(handoff.contains("### Reviewer Final Review Findings"));
+        assert!(handoff.contains("reviewer findings here"));
+        assert!(
+            !handoff.contains("### Implementer Final Review Findings"),
+            "empty implementer section should be omitted"
+        );
+    }
+
+    #[test]
+    fn format_handoff_omits_whitespace_only_sections() {
+        let handoff = format_final_review_handoff("  \n  ", "   ");
+        // Both are whitespace-only, so neither section should appear.
+        assert!(
+            !handoff.contains("### Reviewer"),
+            "whitespace-only reviewer section should be omitted"
+        );
+        assert!(
+            !handoff.contains("### Implementer"),
+            "whitespace-only implementer section should be omitted"
+        );
+    }
+
+    #[test]
+    fn load_findings_suppressed_by_newer_complete_artifact() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write timestamped issues artifact (older).
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nold issues",
+        )
+        .expect("write reviewer issues");
+
+        // Write timestamped complete artifact (newer).
+        std::fs::write(
+            loop_dir.join("20260310110000-quick-dev-final-review-reviewer-complete.md"),
+            "---\nrole: reviewer\n---\nall good",
+        )
+        .expect("write reviewer complete");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        // No implementer findings either, so should be None.
+        assert!(
+            result.is_none(),
+            "stale issues suppressed by newer complete should yield None, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn load_findings_included_when_issues_newer_than_complete() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write timestamped complete artifact (older).
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-reviewer-complete.md"),
+            "---\nrole: reviewer\n---\npreviously complete",
+        )
+        .expect("write reviewer complete");
+
+        // Write timestamped issues artifact (newer — new review found problems).
+        std::fs::write(
+            loop_dir.join("20260310120000-quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nnew problems found",
+        )
+        .expect("write reviewer issues");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_some());
+        let handoff = result.unwrap();
+        assert!(
+            handoff.contains("new problems found"),
+            "newer issues artifact should be included"
+        );
+    }
+
+    #[test]
+    fn load_findings_same_timestamp_suppresses() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Same timestamp for both artifacts — tie goes to complete.
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
+            "---\nrole: implementer\n---\nimpl issues",
+        )
+        .expect("write impl issues");
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-complete.md"),
+            "---\nrole: implementer\n---\nimpl complete",
+        )
+        .expect("write impl complete");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(
+            result.is_none(),
+            "same-timestamp tie should suppress issues, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn extract_artifact_timestamp_valid() {
+        assert_eq!(
+            extract_artifact_timestamp("loops/001-demo/20260310100000-quick-dev-final-review-reviewer-issues.md"),
+            Some("20260310100000")
+        );
+    }
+
+    #[test]
+    fn extract_artifact_timestamp_no_timestamp() {
+        assert_eq!(
+            extract_artifact_timestamp("loops/001-demo/quick-dev-final-review-reviewer-issues.md"),
+            None
+        );
     }
 }
