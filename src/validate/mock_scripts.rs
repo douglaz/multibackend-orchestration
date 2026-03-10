@@ -3397,7 +3397,7 @@ esac
 /// Responds to quick-dev prompts that the implementer handles:
 /// - `plan-and-implement phase` → implementation notes output + creates `mock_file.txt`
 /// - `apply-fixes phase` → implementation response
-/// - quick-dev final-review prompt markers → `# Final Review: NO AMENDMENTS`
+/// - `You are a code reviewer. Review` → `# Final Review: NO AMENDMENTS`
 ///
 /// Environment variable `QUICK_DEV_FINAL_REVIEW_RESULT` controls the final-review
 /// response: "NO_AMENDMENTS" (default) or "AMENDMENTS".
@@ -3434,9 +3434,7 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 EOF
   echo "quick-dev-fixed" >> mock_file.txt
   git add mock_file.txt
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
@@ -3465,7 +3463,7 @@ fi
 ///
 /// Responds to quick-dev prompts that the reviewer handles:
 /// - `quick-dev reviewer` → `# Review: SATISFIED`
-/// - quick-dev final-review prompt markers → `# Final Review: NO AMENDMENTS`
+/// - `You are a code reviewer. Review` → `# Final Review: NO AMENDMENTS`
 ///
 /// Environment variables:
 /// - `QUICK_DEV_REVIEW_RESULT`: "SATISFIED" (default) or "CHANGES REQUESTED"
@@ -3493,9 +3491,7 @@ EOF
 Implementation looks good, no changes needed.
 EOF
   fi
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
@@ -3535,9 +3531,7 @@ if grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Required Changes
 - Always-reject mock: changes requested every time.
 EOF
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -3580,9 +3574,7 @@ EOF
 - Fix the initial implementation issue.
 EOF
   fi
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -3640,9 +3632,7 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 Implementation satisfactory.
 EOF
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   count=0
   if [ -f "$STATE" ]; then
     count="$(cat "$STATE")"
@@ -3666,6 +3656,98 @@ EOF
   fi
 else
   echo "quick-dev-fr-issues-once: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Like `quick_dev_final_review_issues_once_script` but logs the prompt to a
+/// file on the *second* PlanAndImplement call (the reloop after final review
+/// issues).  Used to verify that final-review findings are injected into the
+/// resumed implementer prompt.
+///
+/// Requires env vars:
+/// - `QUICK_DEV_FR_STATE_FILE` — counter file for final review calls
+/// - `QUICK_DEV_PROMPT_LOG` — path to log the re-entry prompt
+pub fn quick_dev_final_review_issues_once_logging_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+STATE="${QUICK_DEV_FR_STATE_FILE:-/tmp/quick-dev-fr-state}"
+PROMPT_LOG="${QUICK_DEV_PROMPT_LOG:-/tmp/quick-dev-prompt-log}"
+IMPL_COUNT_FILE="${QUICK_DEV_IMPL_COUNT:-/tmp/quick-dev-impl-count}"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  # Track implementer invocation count
+  impl_count=0
+  if [ -f "$IMPL_COUNT_FILE" ]; then
+    impl_count="$(cat "$IMPL_COUNT_FILE")"
+  fi
+  impl_count=$((impl_count + 1))
+  echo "$impl_count" > "$IMPL_COUNT_FILE"
+
+  # Log prompt on second (reloop) call
+  if [ "$impl_count" -ge 2 ]; then
+    echo "$INPUT" > "$PROMPT_LOG"
+  fi
+
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Reloop implementation after final review issues.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock only
+EOF
+  echo "quick-dev-reloop-$impl_count" >> mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied fixes.
+
+## Could Not Address
+- None
+EOF
+elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: SATISFIED
+
+## Summary
+Implementation satisfactory.
+EOF
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
+  count=0
+  if [ -f "$STATE" ]; then
+    count="$(cat "$STATE")"
+  fi
+  count=$((count + 1))
+  echo "$count" > "$STATE"
+  if [ "$count" -le 2 ]; then
+    cat <<'EOF'
+# Final Review: AMENDMENTS
+
+## Issues
+- Mock issue requiring re-implementation.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+All requirements met after reloop.
+EOF
+  fi
+else
+  echo "quick-dev-fr-issues-once-logging: unrecognized prompt" >&2
   exit 1
 fi
 "###
@@ -3712,9 +3794,7 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 OK.
 EOF
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: AMENDMENTS
 
@@ -3913,9 +3993,7 @@ EOF
   # Create more stray files on second iteration
   echo "stray notes 2" > 20260304130000-impl-notes.md
   echo "stray response 2" > 20260304130000-impl-response-002.md
-elif grep -q "You are a code reviewer. Review" <<< "$INPUT" \
-  || grep -q "final reviewer auditing" <<< "$INPUT" \
-  || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'

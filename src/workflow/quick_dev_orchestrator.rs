@@ -22,8 +22,8 @@ use crate::project::amendments::{
     format_external_amendments_for_prompt, rollback_drained_amendments,
 };
 use crate::project::artifacts::{
-    resolve_artifact_path_by_suffix, resolve_artifact_path_by_suffixes, strip_backend_frontmatter,
-    write_artifact, write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+    resolve_artifact_path_by_suffix, strip_backend_frontmatter, write_artifact,
+    write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
 use crate::project::lifecycle::reconstruct_project_state;
@@ -287,8 +287,8 @@ impl QuickDevOrchestrator {
             .unwrap_or_default();
 
         let mut last_review_feedback = String::new();
-        let mut last_final_review_feedback = String::new();
         let mut pending_pre_commit_feedback: Option<String> = None;
+        let mut pending_final_review_handoff: Option<String> = None;
 
         // When resuming at ApplyFixes, reconstruct reviewer feedback from the
         // latest changes-requested artifact so the apply-fixes prompt is not
@@ -297,13 +297,14 @@ impl QuickDevOrchestrator {
         if matches!(current_qd_phase, QuickDevPhase::ApplyFixes) {
             last_review_feedback = load_latest_review_feedback(project_dir, loop_number, loop_slug);
         }
-        if matches!(current_qd_phase, QuickDevPhase::PlanAndImplement) {
-            // On a first-pass PlanAndImplement run there are no final-review
-            // artifacts yet, so this reconstructs an empty handoff. On resume
-            // after a final-review reloop, it restores the blocking findings
-            // from disk for crash-safe closure work.
-            last_final_review_feedback =
-                load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
+
+        // When resuming at PlanAndImplement after a final-review reloop,
+        // reconstruct the final-review findings so the implementer knows
+        // exactly what to fix.
+        if matches!(current_qd_phase, QuickDevPhase::PlanAndImplement) && final_review_attempts > 0
+        {
+            pending_final_review_handoff =
+                load_final_review_findings(project_dir, loop_number, loop_slug);
         }
 
         // Compute a safe upper bound on phase transitions from the configured
@@ -339,12 +340,14 @@ impl QuickDevOrchestrator {
                     info!(loop_number, "quick-dev: PlanAndImplement phase");
 
                     let git_diff = current_git_diff(&self.workspace.root)?;
+                    let final_review_handoff =
+                        pending_final_review_handoff.take().unwrap_or_default();
                     let mut prompt = build_plan_implement_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
-                        &last_final_review_feedback,
                         &git_diff,
+                        &final_review_handoff,
                     )?;
 
                     // If re-entering after a pre-commit failure, append the
@@ -726,7 +729,6 @@ impl QuickDevOrchestrator {
                 }
 
                 QuickDevPhase::FinalReview => {
-                    last_final_review_feedback.clear();
                     // Guard-at-entry: if resuming with final_review_attempts
                     // already at the limit, skip both backend calls and
                     // force-complete immediately.
@@ -1030,12 +1032,7 @@ impl QuickDevOrchestrator {
                         });
                     }
 
-                    // Issues found: reload the handoff synchronously from the
-                    // artifacts written above before re-entering
-                    // PlanAndImplement. Keep this coupled to the writes so a
-                    // resumed run sees the exact persisted findings.
-                    last_final_review_feedback =
-                        load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
+                    // Issues found: increment counter and check guard
                     final_review_attempts += 1;
 
                     // Persist incremented counter immediately for crash-safety
@@ -1119,6 +1116,12 @@ impl QuickDevOrchestrator {
 
                     review_iteration = 0;
                     current_qd_phase = QuickDevPhase::PlanAndImplement;
+
+                    // Capture final-review findings so the next
+                    // PlanAndImplement prompt tells the implementer what
+                    // specifically needs to be fixed.
+                    pending_final_review_handoff =
+                        Some(format_final_review_handoff(&impl_body, &rev_body));
                 }
             }
         }
@@ -1264,84 +1267,135 @@ fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 
 /// resuming at the `ApplyFixes` phase after a process restart.
 fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: &str) -> String {
     let suffix = ArtifactKind::QuickDevCodexReview { satisfied: false }.file_name();
-    load_latest_artifact_body(project_dir, loop_number, loop_slug, &suffix)
-}
-
-/// Load the most recent quick-dev final-review issue artifacts and format them
-/// into a closure-oriented handoff for the next PlanAndImplement round.
-fn load_latest_final_review_feedback(
-    project_dir: &Path,
-    loop_number: u32,
-    loop_slug: &str,
-) -> String {
-    let mut sections = Vec::new();
-
-    for role in ["implementer", "reviewer"] {
-        let issues_suffix = ArtifactKind::QuickDevFinalReview {
-            role: role.to_owned(),
-            complete: false,
-        }
-        .file_name();
-        let complete_suffix = ArtifactKind::QuickDevFinalReview {
-            role: role.to_owned(),
-            complete: true,
-        }
-        .file_name();
-        let artifact_rel = match resolve_artifact_path_by_suffixes(
-            project_dir,
-            loop_number,
-            loop_slug,
-            &[issues_suffix.as_str(), complete_suffix.as_str()],
-        ) {
-            Ok(Some(rel)) => rel,
-            _ => continue,
-        };
-        if artifact_rel.ends_with(&complete_suffix) {
-            continue;
-        }
-        let artifact_path = project_dir.join(&artifact_rel);
-        let body = match fs::read_to_string(&artifact_path) {
-            Ok(content) => strip_backend_frontmatter(&content),
-            Err(_) => String::new(),
-        };
-        if body.trim().is_empty() {
-            continue;
-        }
-
-        let label = if role == "implementer" {
-            "Implementer Final Review Findings"
-        } else {
-            "Reviewer Final Review Findings"
-        };
-        sections.push(format!("### {label}\n{body}"));
-    }
-
-    if sections.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "This implementation round was reopened by final review. Close every item below before treating the project as complete.\n\
-             For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n{}",
-            sections.join("\n\n")
-        )
-    }
-}
-
-fn load_latest_artifact_body(
-    project_dir: &Path,
-    loop_number: u32,
-    loop_slug: &str,
-    suffix: &str,
-) -> String {
     let artifact_rel =
-        match resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, suffix) {
+        match resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix) {
             Ok(Some(rel)) => rel,
             _ => return String::new(),
         };
     let artifact_path = project_dir.join(&artifact_rel);
     match fs::read_to_string(&artifact_path) {
-        Ok(content) => strip_backend_frontmatter(&content),
+        Ok(content) => {
+            // Strip frontmatter (between leading `---` lines) to get the body.
+            strip_backend_frontmatter(&content)
+        }
         Err(_) => String::new(),
+    }
+}
+
+/// Format final-review findings from both reviewers into the content for the
+/// `{{final_review_handoff}}` template variable.
+fn format_final_review_handoff(impl_body: &str, rev_body: &str) -> String {
+    let mut handoff = String::from(
+        "This implementation round was reopened by final review. Close every item below before treating the project as complete.\n\
+         For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n",
+    );
+    if !rev_body.trim().is_empty() {
+        handoff.push_str("### Reviewer Final Review Findings\n");
+        handoff.push_str(rev_body);
+        handoff.push('\n');
+    }
+    if !impl_body.trim().is_empty() {
+        handoff.push_str("\n### Implementer Final Review Findings\n");
+        handoff.push_str(impl_body);
+    }
+    handoff
+}
+
+/// Load final-review findings from disk when resuming at PlanAndImplement
+/// after a FinalReview -> PlanAndImplement reloop.  This ensures the handoff
+/// survives process restarts.
+///
+/// For each role (reviewer, implementer), resolves both the `*-issues.md` and
+/// `*-complete.md` artifacts and compares their timestamps.  Findings are only
+/// included when the issues artifact is strictly newer than (or there is no)
+/// complete artifact.  This prevents stale old findings from reappearing if a
+/// prior issues round was later closed by a newer `*-complete.md` and the
+/// daemon restarts in a subsequent PlanAndImplement cycle.
+fn load_final_review_findings(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+) -> Option<String> {
+    let rev_body = load_role_findings_if_latest(project_dir, loop_number, loop_slug, "reviewer");
+    let impl_body =
+        load_role_findings_if_latest(project_dir, loop_number, loop_slug, "implementer");
+
+    if rev_body.is_empty() && impl_body.is_empty() {
+        return None;
+    }
+
+    Some(format_final_review_handoff(&impl_body, &rev_body))
+}
+
+/// Load final-review findings for a single role, but only if the latest
+/// artifact for that role is `*-issues.md` (not `*-complete.md`).
+///
+/// Returns the stripped body or an empty string if findings should not be
+/// included (complete artifact is newer or same timestamp, or no issues).
+fn load_role_findings_if_latest(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    role: &str,
+) -> String {
+    let issues_suffix = ArtifactKind::QuickDevFinalReview {
+        role: role.to_owned(),
+        complete: false,
+    }
+    .file_name();
+    let complete_suffix = ArtifactKind::QuickDevFinalReview {
+        role: role.to_owned(),
+        complete: true,
+    }
+    .file_name();
+
+    let issues_rel =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &issues_suffix)
+            .ok()
+            .flatten();
+    let complete_rel =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &complete_suffix)
+            .ok()
+            .flatten();
+
+    // If there is a complete artifact, only include issues when the issues
+    // artifact has a strictly newer timestamp.  Ties go to complete
+    // (conservative: if they were written at the same second, the review
+    // round was closed).
+    if let (Some(issues_path), Some(complete_path)) = (&issues_rel, &complete_rel) {
+        let issues_ts = extract_artifact_timestamp(issues_path);
+        let complete_ts = extract_artifact_timestamp(complete_path);
+        match (issues_ts, complete_ts) {
+            (Some(it), Some(ct)) if it > ct => {
+                // Issues artifact is newer → include findings.
+            }
+            (Some(_), Some(_)) => {
+                // Complete is newer or same timestamp → suppress.
+                return String::new();
+            }
+            _ => {
+                // Missing timestamps — fall through to include issues if present.
+            }
+        }
+    }
+
+    issues_rel
+        .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
+        .map(|c| strip_backend_frontmatter(&c))
+        .unwrap_or_default()
+}
+
+/// Extract the numeric timestamp prefix from an artifact relative path.
+///
+/// Artifact paths look like `loops/001-slug/20260310123456-suffix.md`.
+/// Returns the timestamp string if present.
+fn extract_artifact_timestamp(rel_path: &str) -> Option<&str> {
+    let file_name = rel_path.rsplit('/').next()?;
+    let (prefix, _) = file_name.split_once('-')?;
+    if prefix.len() == 14 && prefix.chars().all(|c| c.is_ascii_digit()) {
+        Some(prefix)
+    } else {
+        None
     }
 }
 
@@ -1473,30 +1527,21 @@ fn build_plan_implement_prompt(
     effective: &EffectiveConfig,
     prompt_content: &str,
     spec_content: &str,
-    final_review_handoff: &str,
     git_diff: &str,
+    final_review_handoff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
-    let final_review_handoff = final_review_handoff.trim();
     vars.insert(
         "system_guardrails".to_owned(),
         QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned(),
     );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
+    vars.insert("current_diff".to_owned(), git_diff.to_owned());
     vars.insert(
         "final_review_handoff".to_owned(),
         final_review_handoff.to_owned(),
     );
-    vars.insert(
-        "final_review_handoff_section".to_owned(),
-        if final_review_handoff.is_empty() {
-            String::new()
-        } else {
-            format!("## Final Review Handoff\n{final_review_handoff}\n")
-        },
-    );
-    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("current_diff".to_owned(), git_diff.to_owned());
     build_quick_dev_plan_implement_prompt(&effective.templates.quick_dev_plan_implement, &vars)
 }
 
@@ -2066,129 +2111,6 @@ mod tests {
         assert_eq!(loaded.quick_dev_final_review_attempts, 1);
     }
 
-    #[test]
-    fn load_latest_final_review_feedback_combines_roles() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project_dir = temp.path();
-        let loop_dir = project_dir.join("loops/001-quick-dev");
-        fs::create_dir_all(&loop_dir).unwrap();
-
-        fs::write(
-            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nImplementer issue body\n",
-        )
-        .unwrap();
-        fs::write(
-            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
-        )
-        .unwrap();
-
-        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
-        assert!(handoff.contains("Implementer Final Review Findings"));
-        assert!(handoff.contains("Implementer issue body"));
-        assert!(handoff.contains("Reviewer Final Review Findings"));
-        assert!(handoff.contains("Reviewer issue body"));
-    }
-
-    #[test]
-    fn load_latest_final_review_feedback_skips_roles_closed_by_newer_complete() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project_dir = temp.path();
-        let loop_dir = project_dir.join("loops/001-quick-dev");
-        fs::create_dir_all(&loop_dir).unwrap();
-
-        fs::write(
-            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nStale implementer issue\n",
-        )
-        .unwrap();
-        fs::write(
-            loop_dir.join("20260310100002-quick-dev-final-review-implementer-complete.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: NO AMENDMENTS\n\nClosed implementer issue\n",
-        )
-        .unwrap();
-        fs::write(
-            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
-        )
-        .unwrap();
-
-        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
-        assert!(!handoff.contains("Stale implementer issue"));
-        assert!(!handoff.contains("Implementer Final Review Findings"));
-        assert!(handoff.contains("Reviewer Final Review Findings"));
-        assert!(handoff.contains("Reviewer issue body"));
-    }
-
-    #[test]
-    fn load_latest_final_review_feedback_skips_roles_closed_by_same_timestamp_complete() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project_dir = temp.path();
-        let loop_dir = project_dir.join("loops/001-quick-dev");
-        fs::create_dir_all(&loop_dir).unwrap();
-
-        fs::write(
-            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nStale implementer issue\n",
-        )
-        .unwrap();
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        fs::write(
-            loop_dir.join("20260310100000-quick-dev-final-review-implementer-complete.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: NO AMENDMENTS\n\nClosed implementer issue\n",
-        )
-        .unwrap();
-        fs::write(
-            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
-            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
-        )
-        .unwrap();
-
-        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
-        assert!(!handoff.contains("Stale implementer issue"));
-        assert!(!handoff.contains("Implementer Final Review Findings"));
-        assert!(handoff.contains("Reviewer Final Review Findings"));
-        assert!(handoff.contains("Reviewer issue body"));
-    }
-
-    #[test]
-    fn build_plan_implement_prompt_includes_final_review_handoff() {
-        let effective = make_test_effective(
-            Some("claude".to_owned()),
-            Some("codex".to_owned()),
-            "claude".to_owned(),
-        );
-        let prompt = build_plan_implement_prompt(
-            &effective,
-            "master prompt",
-            "spec body",
-            "final review handoff body",
-            "diff body",
-        )
-        .unwrap();
-
-        assert!(prompt.contains("final review handoff body"));
-        assert!(prompt.contains("Fix the root cause, not just the reported symptom"));
-    }
-
-    #[test]
-    fn build_plan_implement_prompt_omits_empty_final_review_handoff_section() {
-        let effective = make_test_effective(
-            Some("claude".to_owned()),
-            Some("codex".to_owned()),
-            "claude".to_owned(),
-        );
-        let prompt =
-            build_plan_implement_prompt(&effective, "master prompt", "spec body", "", "diff body")
-                .unwrap();
-
-        assert!(!prompt.contains("## Final Review Handoff"));
-        assert!(!prompt.contains("None."));
-    }
-
     // Helper to build a minimal EffectiveConfig for testing
     fn make_test_effective(
         implementer: Option<String>,
@@ -2280,6 +2202,7 @@ mod tests {
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
                 max_backend_retries: None,
+                pr_review_whitelist: vec![],
             },
             amendments: EffectiveAmendmentsConfig {
                 unify_final_review: false,
@@ -2287,5 +2210,189 @@ mod tests {
             global: GlobalConfig::default(),
             project: None,
         }
+    }
+
+    #[test]
+    fn format_final_review_handoff_includes_both_bodies() {
+        let result = format_final_review_handoff("impl findings here", "reviewer findings here");
+        assert!(result.contains("### Reviewer Final Review Findings"));
+        assert!(result.contains("reviewer findings here"));
+        assert!(result.contains("### Implementer Final Review Findings"));
+        assert!(result.contains("impl findings here"));
+        assert!(result.contains("reopened by final review"));
+    }
+
+    #[test]
+    fn load_final_review_findings_returns_none_when_no_artifacts() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_final_review_findings_reconstructs_from_artifacts() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write reviewer issues artifact
+        std::fs::write(
+            loop_dir.join("quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nreviewer bug report",
+        )
+        .expect("write reviewer artifact");
+
+        // Write implementer issues artifact
+        std::fs::write(
+            loop_dir.join("quick-dev-final-review-implementer-issues.md"),
+            "---\nrole: implementer\n---\nimpl bug report",
+        )
+        .expect("write impl artifact");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_some());
+        let handoff = result.unwrap();
+        assert!(handoff.contains("reviewer bug report"));
+        assert!(handoff.contains("impl bug report"));
+        assert!(handoff.contains("### Reviewer Final Review Findings"));
+        assert!(handoff.contains("### Implementer Final Review Findings"));
+    }
+
+    #[test]
+    fn format_handoff_omits_empty_reviewer_section() {
+        let handoff = format_final_review_handoff("impl findings here", "");
+        assert!(
+            !handoff.contains("### Reviewer Final Review Findings"),
+            "empty reviewer section should be omitted"
+        );
+        assert!(handoff.contains("### Implementer Final Review Findings"));
+        assert!(handoff.contains("impl findings here"));
+    }
+
+    #[test]
+    fn format_handoff_omits_empty_implementer_section() {
+        let handoff = format_final_review_handoff("", "reviewer findings here");
+        assert!(handoff.contains("### Reviewer Final Review Findings"));
+        assert!(handoff.contains("reviewer findings here"));
+        assert!(
+            !handoff.contains("### Implementer Final Review Findings"),
+            "empty implementer section should be omitted"
+        );
+    }
+
+    #[test]
+    fn format_handoff_omits_whitespace_only_sections() {
+        let handoff = format_final_review_handoff("  \n  ", "   ");
+        // Both are whitespace-only, so neither section should appear.
+        assert!(
+            !handoff.contains("### Reviewer"),
+            "whitespace-only reviewer section should be omitted"
+        );
+        assert!(
+            !handoff.contains("### Implementer"),
+            "whitespace-only implementer section should be omitted"
+        );
+    }
+
+    #[test]
+    fn load_findings_suppressed_by_newer_complete_artifact() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write timestamped issues artifact (older).
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nold issues",
+        )
+        .expect("write reviewer issues");
+
+        // Write timestamped complete artifact (newer).
+        std::fs::write(
+            loop_dir.join("20260310110000-quick-dev-final-review-reviewer-complete.md"),
+            "---\nrole: reviewer\n---\nall good",
+        )
+        .expect("write reviewer complete");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        // No implementer findings either, so should be None.
+        assert!(
+            result.is_none(),
+            "stale issues suppressed by newer complete should yield None, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn load_findings_included_when_issues_newer_than_complete() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write timestamped complete artifact (older).
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-reviewer-complete.md"),
+            "---\nrole: reviewer\n---\npreviously complete",
+        )
+        .expect("write reviewer complete");
+
+        // Write timestamped issues artifact (newer — new review found problems).
+        std::fs::write(
+            loop_dir.join("20260310120000-quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nnew problems found",
+        )
+        .expect("write reviewer issues");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_some());
+        let handoff = result.unwrap();
+        assert!(
+            handoff.contains("new problems found"),
+            "newer issues artifact should be included"
+        );
+    }
+
+    #[test]
+    fn load_findings_same_timestamp_suppresses() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Same timestamp for both artifacts — tie goes to complete.
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
+            "---\nrole: implementer\n---\nimpl issues",
+        )
+        .expect("write impl issues");
+        std::fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-complete.md"),
+            "---\nrole: implementer\n---\nimpl complete",
+        )
+        .expect("write impl complete");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(
+            result.is_none(),
+            "same-timestamp tie should suppress issues, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn extract_artifact_timestamp_valid() {
+        assert_eq!(
+            extract_artifact_timestamp(
+                "loops/001-demo/20260310100000-quick-dev-final-review-reviewer-issues.md"
+            ),
+            Some("20260310100000")
+        );
+    }
+
+    #[test]
+    fn extract_artifact_timestamp_no_timestamp() {
+        assert_eq!(
+            extract_artifact_timestamp("loops/001-demo/quick-dev-final-review-reviewer-issues.md"),
+            None
+        );
     }
 }

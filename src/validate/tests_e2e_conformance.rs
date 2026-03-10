@@ -10,6 +10,8 @@ use crate::validate::mock_scripts::{
 };
 use serde_json::json;
 
+use super::env_lock;
+
 /// RAII guard that restores an env var to its previous state on drop,
 /// ensuring cleanup even on panic.
 struct EnvGuard {
@@ -560,9 +562,7 @@ fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
         // Call create_pr_with_body_file via the runtime.
         // Env mutations are protected by a mutex + RAII guard to prevent
         // cross-test interference under parallel execution.
-        let _env_lock = crate::validate::process_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env_lock = env_lock().lock().expect("env lock");
         let _path_guard = EnvGuard::set("PATH", &composed);
         let _gh_log_guard = EnvGuard::set("RALPH_E2E_GH_LOG", &gh_log.to_string_lossy());
 

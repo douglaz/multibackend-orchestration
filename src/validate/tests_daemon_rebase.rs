@@ -611,9 +611,7 @@ fn with_mock_claude_bin<F, R>(mock_claude_path: &std::path::Path, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let _guard = crate::validate::process_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = super::env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let original = std::env::var("RALPH_REBASE_AGENT_CLAUDE_BIN").ok();
     unsafe {
         std::env::set_var(

@@ -62,7 +62,8 @@ CRITICAL FORMAT REQUIREMENTS:
 ## Feature Specification
 {{feature_spec}}
 
-{{final_review_handoff_section}}
+## Final Review Handoff
+{{final_review_handoff}}
 
 ## Master Prompt
 {{master_prompt}}
@@ -111,11 +112,6 @@ fn default_quick_dev_apply_fixes_template() -> &'static str {
     r#"You are the implementer in quick-dev apply-fixes phase.
 
 Apply the reviewer-requested changes exactly, minimizing unrelated edits.
-Treat the reviewer feedback as a closure checklist:
-- Address each requested change explicitly.
-- If a requested change is already satisfied, cite the exact file/test evidence.
-- Verify adjacent invariants on touched paths instead of patching only the immediate symptom.
-- Add or tighten regression tests for real bug fixes when feasible.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)

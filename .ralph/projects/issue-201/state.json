@@ -1,0 +1,50 @@
+{
+  "project_id": "issue-201",
+  "project_name": "Implement an automated PR review feedback loop that monitors",
+  "created_at": "2026-03-10T02:58:21.304890359Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "b02614e66bf05a717a1783a79e5517f0ec9f9a8a3568969d21f44b24f77aac4d",
+  "prompt_hash_at_loop_start": "b02614e66bf05a717a1783a79e5517f0ec9f9a8a3568969d21f44b24f77aac4d",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 15,
+  "current_phase": "reviewing",
+  "quick_dev_phase": "codex_review",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 15,
+      "slug": "quick-dev",
+      "feature_name": "quick dev",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "",
+        "implementer": "",
+        "reviewer": "",
+        "qa": ""
+      },
+      "artifacts": {
+        "spec": "loops/015-quick-dev/spec.md",
+        "impl_notes": null,
+        "reviews": [],
+        "approval": null,
+        "qa_results": [],
+        "pending_qa_feedback": null,
+        "pending_pre_commit_feedback": null,
+        "latest_pre_commit_response_iteration": null
+      },
+      "commit": "c0cb9303cdddb2f1ba266f148979a75af8db403e",
+      "started_at": "2026-03-10T03:14:33Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": [],
+  "session_store": {
+    "records": []
+  },
+  "pr_url": "https://github.com/douglaz/multibackend-orchestration/pull/202",
+  "quick_dev_review_iteration": 0,
+  "quick_dev_final_review_attempts": 11
+}

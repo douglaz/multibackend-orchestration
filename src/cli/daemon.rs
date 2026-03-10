@@ -258,6 +258,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             git_bin,
             gh_bin,
             max_backend_retries: daemon_cfg.max_backend_retries,
+            pr_review_whitelist: daemon_cfg.pr_review_whitelist.clone(),
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;

@@ -4313,9 +4313,7 @@ exit 0
         };
 
         // Inject a real panic for issue #110
-        let _guard = crate::validate::process_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = super::env_lock().lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };

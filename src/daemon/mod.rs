@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod github;
 pub mod interactive_prd;
+pub mod pr_review;
 pub mod process;
 pub mod rebase_agent;
 pub mod refine;
@@ -76,9 +77,9 @@ pub async fn abort_task_by_labels(
         "ralph:failed",
     )
     .await
-    .map_err(|err| {
+    .map_err(|swap_err| {
         crate::error::RalphError::Orchestration(format!(
-            "failed to update labels for abort of {owner}/{repo}#{issue_number}: {err}"
+            "failed to update labels for abort of {owner}/{repo}#{issue_number}: {swap_err}"
         ))
     })?;
 

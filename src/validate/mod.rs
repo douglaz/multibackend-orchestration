@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 
 use clap::Args;
 
@@ -27,6 +26,7 @@ mod tests_init;
 mod tests_interactive_prd;
 mod tests_openrouter;
 mod tests_pr_lifecycle;
+mod tests_pr_review;
 mod tests_pr_runtime;
 mod tests_prd;
 mod tests_pre_commit_checks;
@@ -47,9 +47,15 @@ mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
 
-pub(crate) fn process_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+/// Process-wide mutex for env-var mutations in validate tests.
+///
+/// The validate runner executes tests in parallel via `thread::scope`, and
+/// `std::env::set_var` is process-global.  All test modules that mutate env
+/// vars (`PATH`, `RALPH_E2E_GH_LOG`, etc.) must acquire this shared lock to
+/// prevent cross-module races.
+pub(crate) fn env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[derive(Debug, Args, Clone)]
@@ -146,6 +152,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_openrouter::tests());
     tests.extend(tests_validate_flags::tests());
     tests.extend(tests_quick_prd::tests());
+    tests.extend(tests_pr_review::tests());
     tests.extend(tests_pre_commit_checks::tests());
     tests.extend(tests_amendments::tests());
     tests

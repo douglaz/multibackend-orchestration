@@ -82,6 +82,8 @@ pub struct DaemonRuntimeConfig {
     /// Maximum number of backend timeout retries per invocation.
     /// Threaded through to task params so orchestrators use a consistent value.
     pub max_backend_retries: Option<u8>,
+    /// GitHub usernames whose PR review comments trigger amendments.
+    pub pr_review_whitelist: Vec<String>,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -723,7 +725,45 @@ pub fn load_task_metadata(workspace_root: &Path, task_id: &str) -> TaskMetadata 
     }
 }
 
+/// Result of a strict task metadata load that distinguishes missing files
+/// from corrupt/unreadable files.
+pub enum TaskMetadataLoadResult {
+    /// File exists and parsed successfully.
+    Ok(TaskMetadata),
+    /// File does not exist (definitively missing).
+    NotFound,
+    /// File exists but could not be read or parsed (transient/corrupt).
+    Error(String),
+}
+
+/// Load task metadata with strict error handling.
+///
+/// Unlike [`load_task_metadata`], this variant distinguishes `NotFound`
+/// (file absent) from parse/read errors so that callers can avoid
+/// destructive actions (e.g. clearing staged amendments) when the metadata
+/// file is corrupt rather than missing.
+pub fn load_task_metadata_strict(workspace_root: &Path, task_id: &str) -> TaskMetadataLoadResult {
+    let path = task_metadata_path(workspace_root, task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<TaskMetadata>(&content) {
+            Ok(meta) => TaskMetadataLoadResult::Ok(meta),
+            Err(err) => TaskMetadataLoadResult::Error(format!(
+                "corrupt task metadata at {}: {err}",
+                path.display()
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TaskMetadataLoadResult::NotFound,
+        Err(err) => TaskMetadataLoadResult::Error(format!(
+            "failed to read task metadata at {}: {err}",
+            path.display()
+        )),
+    }
+}
+
 /// Persist task metadata to disk (best-effort: logs on failure).
+///
+/// Uses atomic temp-file + rename to prevent crash-interrupted writes from
+/// leaving truncated/corrupt JSON that would silently reset metadata.
 pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetadata) {
     let path = task_metadata_path(workspace_root, task_id);
     if let Some(parent) = path.parent() {
@@ -731,8 +771,13 @@ pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetad
     }
     match serde_json::to_string_pretty(meta) {
         Ok(json) => {
-            if let Err(err) = std::fs::write(&path, json) {
-                eprintln!("warning: failed to persist task metadata for {task_id}: {err}");
+            let tmp_path = path.with_extension("json.tmp");
+            if let Err(err) = std::fs::write(&tmp_path, &json) {
+                eprintln!("warning: failed to write task metadata tmp for {task_id}: {err}");
+                return;
+            }
+            if let Err(err) = std::fs::rename(&tmp_path, &path) {
+                eprintln!("warning: failed to rename task metadata for {task_id}: {err}");
             }
         }
         Err(err) => {
@@ -839,6 +884,13 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children, &repo_root_lock).await;
+
+        // PR review polling phase: detect review comments and resume completed projects
+        if !config.pr_review_whitelist.is_empty() {
+            if let Err(err) = pr_review_phase(config, &mut children, &repo_root_lock).await {
+                eprintln!("warning: PR review polling failed: {err}");
+            }
+        }
 
         // Interactive PRD phase: in single-iteration mode, run exactly one
         // inline tick (no background task). In continuous mode, PRD runs as
@@ -1110,6 +1162,108 @@ async fn poll_and_claim(
             continue;
         }
 
+        // Skip issues owned by pr_review_phase: if a resume-pending marker or
+        // staged PR-review amendments exist AND pr_review_phase can actually
+        // own this issue (task metadata with pr_url exists and that PR is
+        // still open), then pr_review_phase exclusively owns this issue.
+        // Without this guard, a failed PR-review resume that rolls back to
+        // ralph:ready would let the claim path immediately re-dispatch as
+        // DispatchOrigin::Claim in the same iteration, bypassing the
+        // resume-only safety path.
+        //
+        // However, if task metadata is missing or the PR is closed/merged,
+        // pr_review_phase cannot dispatch this issue — so we must NOT block
+        // the claim path.  In that case we warn and clear stale artifacts.
+        if !config.pr_review_whitelist.is_empty() {
+            let task_id = super::format_task_id(&config.owner, &config.repo, issue.number);
+            let has_marker_or_staged =
+                super::pr_review::has_resume_pending_marker(&config.workspace_root, &task_id)
+                    || super::pr_review::has_staged_amendments(&config.workspace_root, &task_id);
+            if has_marker_or_staged {
+                // Verify pr_review_phase can actually own this issue: task
+                // metadata must exist with a pr_url, and that PR must be open.
+                //
+                // Use strict metadata loading to distinguish NotFound from
+                // corrupt/unreadable files.  Corrupt metadata must NOT cause
+                // clearing of staged amendments (data-loss risk).
+                let meta_result = load_task_metadata_strict(&config.workspace_root, &task_id);
+                // Tri-state: Some(true) = PR open, Some(false) = PR closed/missing,
+                // None = transient error (unknown).
+                let pr_check_result = match &meta_result {
+                    TaskMetadataLoadResult::Error(err) => {
+                        eprintln!(
+                            "warning: {err}; deferring claim for issue #{} to avoid \
+                             clearing staged amendments",
+                            issue.number
+                        );
+                        None
+                    }
+                    TaskMetadataLoadResult::NotFound => Some(false),
+                    TaskMetadataLoadResult::Ok(meta) => {
+                        if let Some(pr_url) = &meta.pr_url {
+                            if let Some(pr_number) = github::extract_pr_number(pr_url) {
+                                match github::is_pr_open(
+                                    &config.owner,
+                                    &config.repo,
+                                    pr_number,
+                                    &config.gh_bin,
+                                )
+                                .await
+                                {
+                                    Ok(true) => Some(true),
+                                    Ok(false) => Some(false),
+                                    Err(err) => {
+                                        eprintln!(
+                                            "warning: transient error checking PR state for issue #{}: {err}; \
+                                             deferring claim to avoid clearing staged amendments",
+                                            issue.number
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                Some(false)
+                            }
+                        } else {
+                            Some(false)
+                        }
+                    }
+                };
+
+                match pr_check_result {
+                    None => {
+                        // Transient error — do not clear artifacts, skip this
+                        // issue this cycle.
+                        continue;
+                    }
+                    Some(true) => {
+                        if config.verbose {
+                            eprintln!(
+                                "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
+                                 owned by pr_review_phase",
+                                issue.number
+                            );
+                        }
+                        continue;
+                    }
+                    Some(false) => {
+                        // PR is definitively closed/missing or metadata
+                        // unparseable — safe to clear stale artifacts.
+                        eprintln!(
+                            "warning: clearing stale PR-review artifacts for issue #{} — \
+                             task metadata missing or PR not open; allowing normal claim dispatch",
+                            issue.number
+                        );
+                        super::pr_review::clear_resume_pending_marker(
+                            &config.workspace_root,
+                            &task_id,
+                        );
+                        super::pr_review::clear_staged_amendments(&config.workspace_root, &task_id);
+                    }
+                }
+            }
+        }
+
         // Claim: ready -> in-progress
         if let Err(err) = github::swap_lifecycle_label(
             &config.owner,
@@ -1193,6 +1347,7 @@ async fn poll_and_claim(
                     &claimed.raw_idea,
                     &claimed.issue_labels,
                     &repo_root_lock,
+                    DispatchOrigin::Claim,
                 )
                 .await
             });
@@ -1350,6 +1505,15 @@ fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
     Ok(())
 }
 
+/// Origin of a dispatch call, used to scope PR-review-specific logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOrigin {
+    /// Normal claim flow (poll_and_claim).
+    Claim,
+    /// PR-review resume flow (pr_review_phase).
+    PrReviewResume,
+}
+
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
 async fn dispatch_task(
     config: &DaemonRuntimeConfig,
@@ -1357,6 +1521,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
+    origin: DispatchOrigin,
 ) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
@@ -1433,6 +1598,54 @@ async fn dispatch_task(
         spawn_blocking_op(move || Ok(should_resume_issue_project(&wt, &pid))).await?
     };
 
+    // PrReviewResume dispatches MUST resume an existing project.  If the
+    // project state is missing or corrupt (no prompt.md on the branch),
+    // fall back would start a fresh implementation cycle with a placeholder
+    // prompt — which is never correct.  Fail fast *before* draining staged
+    // amendments so pr_review_phase can roll back the label swap and
+    // preserve staged amendments without side effects.
+    if origin == DispatchOrigin::PrReviewResume && !resume_existing_project {
+        return Err(RalphError::Orchestration(format!(
+            "PrReviewResume dispatch for {task_id} cannot resume: project state not found in worktree \
+             (prompt.md missing on branch {branch_name}); aborting to preserve staged amendments"
+        )));
+    }
+
+    // Drain any staged PR review amendments into the project's amendment queue.
+    // Both drain and purge are gated to PrReviewResume dispatches only — running
+    // them on normal Claim paths would consume staged amendments without the
+    // accompanying state reset, causing quick-dev short-circuits to skip
+    // processing and lose staged feedback.
+    let drained_count = if origin == DispatchOrigin::PrReviewResume {
+        let ws = config.workspace_root.clone();
+        let tid = task_id.clone();
+        let pid = project_id.clone();
+        let wt = wt_path.clone();
+        let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
+        let drained = spawn_blocking_op(move || {
+            if !super::pr_review::has_staged_amendments(&ws, &tid) {
+                return Ok(0);
+            }
+            let project_dir = wt.join(".ralph").join("projects").join(&pid);
+            if project_dir.exists() {
+                let count = super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
+                if count > 0 {
+                    super::pr_review::reset_project_state_for_resume(&project_dir, is_quick)?;
+                }
+                Ok(count)
+            } else {
+                Ok(0)
+            }
+        })
+        .await?;
+        if drained > 0 {
+            eprintln!("dispatch: drained {drained} staged PR review amendment(s) for {task_id}");
+        }
+        drained
+    } else {
+        0
+    };
+
     if resume_existing_project {
         eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
     } else {
@@ -1449,61 +1662,73 @@ async fn dispatch_task(
         }
     }
 
-    // Refine the prompt if enabled.
-    // For prd-done issues, skip refinement entirely to preserve the exact
-    // approved spec (or compose_raw_idea fallback) as the dispatch payload.
-    let has_prd_done = issue_labels.iter().any(|l| l == "ralph:prd-done");
-    let (idea, refined_title, cleaned_body) = if config.refinement_enabled && !has_prd_done {
-        match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
-            .await
-        {
-            Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
-            Err(err) => {
-                eprintln!("warning: refinement failed for task {task_id}, using raw idea: {err}");
-                (raw_idea.to_owned(), None, None)
+    // Skip refinement, issue title/body updates, and refined-prompt comment for
+    // resumed projects — the issue already has real content from the original
+    // dispatch, and raw_idea may be a placeholder (e.g. PR review resume).
+    let idea = if resume_existing_project {
+        raw_idea.to_owned()
+    } else {
+        // Refine the prompt if enabled.
+        // For prd-done issues, skip refinement entirely to preserve the exact
+        // approved spec (or compose_raw_idea fallback) as the dispatch payload.
+        let has_prd_done = issue_labels.iter().any(|l| l == "ralph:prd-done");
+        let (idea, refined_title, cleaned_body) = if config.refinement_enabled && !has_prd_done {
+            match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
+                .await
+            {
+                Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
+                Err(err) => {
+                    eprintln!(
+                        "warning: refinement failed for task {task_id}, using raw idea: {err}"
+                    );
+                    (raw_idea.to_owned(), None, None)
+                }
+            }
+        } else {
+            (raw_idea.to_owned(), None, None)
+        };
+
+        // Update GitHub issue title with refined title (best-effort)
+        if let Some(ref title) = refined_title {
+            if let Err(err) =
+                github::update_issue_title(&config.owner, &config.repo, issue_number, title).await
+            {
+                eprintln!("warning: failed to update issue title for {task_id}: {err}");
             }
         }
-    } else {
-        (raw_idea.to_owned(), None, None)
+
+        // Update GitHub issue body with cleaned body (best-effort)
+        if let Some(ref cleaned_body) = cleaned_body {
+            if let Err(err) =
+                github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body)
+                    .await
+            {
+                eprintln!("warning: failed to update issue body for {task_id}: {err}");
+            }
+        }
+
+        // Post refined-prompt comment (best-effort)
+        {
+            let comment_body = match &refined_title {
+                Some(title) => format!("**{title}**\n\n{idea}"),
+                None => idea.clone(),
+            };
+            if let Err(err) = github::post_idempotent_comment(
+                &config.owner,
+                &config.repo,
+                issue_number,
+                &task_id,
+                "refined-prompt",
+                &comment_body,
+            )
+            .await
+            {
+                eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
+            }
+        }
+
+        idea
     };
-
-    // Update GitHub issue title with refined title (best-effort)
-    if let Some(ref title) = refined_title {
-        if let Err(err) =
-            github::update_issue_title(&config.owner, &config.repo, issue_number, title).await
-        {
-            eprintln!("warning: failed to update issue title for {task_id}: {err}");
-        }
-    }
-
-    // Update GitHub issue body with cleaned body (best-effort)
-    if let Some(ref cleaned_body) = cleaned_body {
-        if let Err(err) =
-            github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body).await
-        {
-            eprintln!("warning: failed to update issue body for {task_id}: {err}");
-        }
-    }
-
-    // Post refined-prompt comment (best-effort)
-    {
-        let comment_body = match &refined_title {
-            Some(title) => format!("**{title}**\n\n{idea}"),
-            None => idea.clone(),
-        };
-        if let Err(err) = github::post_idempotent_comment(
-            &config.owner,
-            &config.repo,
-            issue_number,
-            &task_id,
-            "refined-prompt",
-            &comment_body,
-        )
-        .await
-        {
-            eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
-        }
-    }
 
     // Create log file for child output
     let log_path = task_log_path(&config.workspace_root, &task_id);
@@ -1703,6 +1928,13 @@ async fn dispatch_task(
     } else {
         None
     };
+
+    // Staged amendment files were copied (not moved) during drain — now that
+    // spawn succeeded, purge the originals so they are not re-drained on a
+    // future cycle.  Only purge when we actually drained amendments.
+    if drained_count > 0 {
+        super::pr_review::purge_staged_amendments(&config.workspace_root, &task_id);
+    }
 
     eprintln!("dispatched task {task_id} (in-process)");
 
@@ -2324,6 +2556,13 @@ async fn complete_task_attempt(
         .await?;
     }
 
+    // Clear resume-pending marker now that the task has reached a terminal
+    // state.  This is the durable source-of-truth: the marker persists from
+    // pr_review_phase through dispatch and task execution, and is only cleared
+    // here — ensuring crash recovery at any earlier point can still detect the
+    // in-flight resume.
+    super::pr_review::clear_resume_pending_marker(&config.workspace_root, task_id);
+
     // Worktree cleanup
     cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
 
@@ -2417,6 +2656,365 @@ enum RebaseOutcome {
         error: String,
         is_lease: bool,
     },
+}
+
+/// PR review polling phase: detect review comments from whitelisted users on
+/// open PRs, stage amendments, and re-dispatch completed projects.
+///
+/// In addition to newly-discovered amendments, this also retries dispatch for
+/// tasks that have staged amendments from previous cycles (e.g. deferred due to
+/// capacity constraints).
+async fn pr_review_phase(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, TaskHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+) -> Result<()> {
+    // Per-cycle cache for PR open state shared between polling and dispatch phases
+    // to avoid redundant GitHub API calls for the same PR.
+    let mut pr_open_cache: HashMap<u32, bool> = HashMap::new();
+
+    let poll_results =
+        match super::pr_review::poll_pr_reviews(config, children, &mut pr_open_cache).await {
+            Ok(results) => results,
+            Err(err) => {
+                eprintln!(
+                    "warning: PR review polling failed, continuing with staged amendments: {err}"
+                );
+                Vec::new()
+            }
+        };
+
+    // Build the set of task_ids that received new amendments this cycle.
+    let newly_staged: std::collections::HashSet<String> =
+        poll_results.iter().map(|r| r.task_id.clone()).collect();
+
+    // Also discover tasks with previously-staged amendments (deferred on earlier
+    // cycles due to capacity or other transient issues).
+    let all_tasks = super::pr_review::discover_tasks_with_prs(
+        &config.workspace_root,
+        &config.owner,
+        &config.repo,
+    );
+
+    // Merge: poll_results + tasks with staged amendments not already in poll_results.
+    struct DispatchCandidate {
+        task_id: String,
+        issue_number: u32,
+        pr_number: u32,
+    }
+
+    // poll_results candidates are known-open (poll_pr_reviews already checked and
+    // populated the cache).
+    let mut candidates: Vec<DispatchCandidate> = Vec::new();
+    for r in &poll_results {
+        candidates.push(DispatchCandidate {
+            task_id: r.task_id.clone(),
+            issue_number: r.issue_number,
+            pr_number: r.pr_number,
+        });
+    }
+
+    for task_info in &all_tasks {
+        if newly_staged.contains(&task_info.task_id) {
+            continue; // already a candidate from poll_results
+        }
+        // A task qualifies for re-dispatch if it has staged amendments OR a
+        // resume-pending marker.  The marker case covers crash-after-dispatch:
+        // staged files were purged but the task never reached terminal
+        // completion, so the marker is the durable recovery signal.
+        if super::pr_review::has_staged_amendments(&config.workspace_root, &task_info.task_id)
+            || super::pr_review::has_resume_pending_marker(
+                &config.workspace_root,
+                &task_info.task_id,
+            )
+        {
+            candidates.push(DispatchCandidate {
+                task_id: task_info.task_id.clone(),
+                issue_number: task_info.issue_number,
+                pr_number: task_info.pr_number,
+            });
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    // For each candidate, check if it needs re-dispatch.
+    for candidate in &candidates {
+        // Skip if already running.
+        if children.contains_key(&candidate.issue_number) {
+            continue;
+        }
+
+        // Gate dispatch on PR still being open (use cache to avoid duplicate calls).
+        if candidate.pr_number > 0 {
+            let is_open = match pr_open_cache.get(&candidate.pr_number) {
+                Some(&cached) => cached,
+                None => {
+                    let open = match github::is_pr_open(
+                        &config.owner,
+                        &config.repo,
+                        candidate.pr_number,
+                        &config.gh_bin,
+                    )
+                    .await
+                    {
+                        Ok(o) => o,
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to check PR #{} state for {}: {err}",
+                                candidate.pr_number, candidate.task_id
+                            );
+                            continue;
+                        }
+                    };
+                    pr_open_cache.insert(candidate.pr_number, open);
+                    open
+                }
+            };
+            if !is_open {
+                continue;
+            }
+        }
+
+        // Check capacity.
+        let slots = config.max_concurrent.saturating_sub(children.len() as u32);
+        if slots == 0 {
+            eprintln!(
+                "PR review amendments pending for {} but no capacity slots available; deferring",
+                candidate.task_id
+            );
+            continue;
+        }
+
+        // Fetch issue labels to determine current state.
+        let labels = match github::fetch_issue_labels_with_gh_bin(
+            &config.gh_bin,
+            &config.owner,
+            &config.repo,
+            candidate.issue_number,
+        )
+        .await
+        {
+            Ok(labels) => labels,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to fetch labels for issue #{} ({}): {err}",
+                    candidate.issue_number, candidate.task_id
+                );
+                continue;
+            }
+        };
+
+        // Multi-lifecycle normalization: if the issue has more than one
+        // lifecycle label, normalize to ralph:failed and skip this cycle.
+        // This prevents resuming from an ambiguous state and mirrors the
+        // same policy used in the claim flow (poll_and_claim).
+        let lifecycle = github::classify_lifecycle_labels(&labels);
+        if lifecycle.len() > 1 {
+            match github::normalize_multi_lifecycle_labels(
+                &config.owner,
+                &config.repo,
+                candidate.issue_number,
+                &lifecycle,
+            )
+            .await
+            {
+                Ok(true) => {
+                    eprintln!(
+                        "pr-review: normalized multi-lifecycle issue #{} to ralph:failed, skipping",
+                        candidate.issue_number
+                    );
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to normalize multi-lifecycle labels on #{} during PR review: {err}",
+                        candidate.issue_number
+                    );
+                }
+            }
+            continue;
+        }
+
+        // Resume projects labeled ralph:completed, or ralph:ready when a
+        // resume-pending marker OR staged amendments exist.  The marker case
+        // covers restart-drift (label was swapped to in-progress but daemon
+        // crashed before dispatch, then startup reconciliation converted
+        // in-progress → ready).  The staged-amendments case covers comments
+        // staged for a ralph:ready issue that never had a marker set yet.
+        //
+        // Recovery: when a resume-pending marker exists but NO lifecycle label
+        // is present, a prior swap removed the label and both forward-add and
+        // rollback-add failed, stranding the issue.  Re-add ralph:ready so the
+        // normal swap path can proceed.
+        let has_marker =
+            super::pr_review::has_resume_pending_marker(&config.workspace_root, &candidate.task_id);
+        let has_staged =
+            super::pr_review::has_staged_amendments(&config.workspace_root, &candidate.task_id);
+        let no_lifecycle = lifecycle.is_empty();
+
+        let mut labels = labels;
+        let from_label = if labels.iter().any(|l| l == "ralph:completed") {
+            "ralph:completed"
+        } else if labels.iter().any(|l| l == "ralph:ready") && (has_marker || has_staged) {
+            "ralph:ready"
+        } else if no_lifecycle && has_marker {
+            // Stranded issue: marker present but no lifecycle label.
+            // Re-add ralph:ready so the swap path can proceed.
+            match github::add_label_with_retry(
+                &config.owner,
+                &config.repo,
+                candidate.issue_number,
+                "ralph:ready",
+            )
+            .await
+            {
+                Ok(()) => {
+                    eprintln!(
+                        "pr-review: recovered stranded issue #{} \
+                         (no lifecycle label + marker present); re-added ralph:ready",
+                        candidate.issue_number
+                    );
+                    labels.push("ralph:ready".to_string());
+                    "ralph:ready"
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to recover stranded issue #{} \
+                         (no lifecycle label + marker): {err}",
+                        candidate.issue_number
+                    );
+                    continue;
+                }
+            }
+        } else {
+            continue;
+        };
+
+        eprintln!(
+            "pr-review: resuming {from_label} task {} with staged amendment(s)",
+            candidate.task_id
+        );
+
+        // Set resume-pending marker before label swap so that restart-drift
+        // (completed → in-progress → [crash] → ready) can be detected.
+        // Also set for ready+staged (no prior marker) so the same safety
+        // property holds during the swap.
+        if !has_marker {
+            if let Err(err) = super::pr_review::set_resume_pending_marker(
+                &config.workspace_root,
+                &candidate.task_id,
+            ) {
+                eprintln!(
+                    "warning: failed to set resume-pending marker for {}: {err}",
+                    candidate.task_id
+                );
+                continue;
+            }
+        }
+
+        // Swap label: ralph:{completed|ready} -> ralph:in-progress
+        if let Err(swap_err) = github::swap_lifecycle_label(
+            &config.owner,
+            &config.repo,
+            candidate.issue_number,
+            from_label,
+            "ralph:in-progress",
+        )
+        .await
+        {
+            eprintln!(
+                "warning: failed to swap lifecycle label for {}: {swap_err}",
+                candidate.task_id
+            );
+            // Label swap failed — no in-flight resume actually started.
+            // Only clear the marker when:
+            // 1. It was created in this cycle (!has_marker at entry), AND
+            // 2. The original label was *confirmed* restored (Some(true)).
+            //    - None: remove step failed — label *may* be absent due to
+            //      concurrent removal, so we cannot assume it is still present.
+            //    - Some(false): rollback explicitly failed — label is missing.
+            //    In both ambiguous/failed cases, keep the marker so restart
+            //    recovery can detect the stranded state and retry next cycle.
+            let label_confirmed_restored = swap_err.from_label_restored == Some(true);
+            if !has_marker && label_confirmed_restored {
+                super::pr_review::clear_resume_pending_marker(
+                    &config.workspace_root,
+                    &candidate.task_id,
+                );
+            }
+            continue;
+        }
+
+        // Compose a minimal raw_idea for dispatch (it won't be used for resumed projects
+        // since should_resume_issue_project will return true).
+        let raw_idea = format!("PR review amendments for issue #{}", candidate.issue_number);
+
+        // Dispatch the task. State reset and amendment drain happen inside dispatch_task
+        // after worktree creation and before task spawn.
+        match dispatch_task(
+            config,
+            candidate.issue_number,
+            &raw_idea,
+            &labels,
+            repo_root_lock,
+            DispatchOrigin::PrReviewResume,
+        )
+        .await
+        {
+            Ok(handle) => {
+                children.insert(candidate.issue_number, handle);
+                // NOTE: resume-pending marker is intentionally NOT cleared here.
+                // It persists until terminal completion (complete_task) so that a
+                // daemon crash after dispatch but before amendment consumption
+                // can still be recovered on restart.
+                eprintln!(
+                    "pr-review: dispatched task {} for PR review amendments",
+                    candidate.task_id
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to dispatch task {} for PR review amendments: {err}",
+                    candidate.task_id
+                );
+                // Revert label swap on dispatch failure.
+                if let Err(rollback_err) = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    candidate.issue_number,
+                    "ralph:in-progress",
+                    from_label,
+                )
+                .await
+                {
+                    eprintln!(
+                        "warning: pr-review dispatch rollback failed for {} (issue #{}): {rollback_err}; \
+                         issue may be stuck in ralph:in-progress — will be recovered at next daemon restart",
+                        candidate.task_id, candidate.issue_number
+                    );
+                    // Keep marker when rollback fails — restart recovery needs
+                    // it to detect the in-flight resume that got stuck.
+                } else {
+                    // Rollback succeeded — issue is back to its original label
+                    // and no in-flight resume is active.  Only clear the marker
+                    // when it was created in this cycle (!has_marker at entry).
+                    // For pre-existing markers the marker must persist so
+                    // retries remain possible.
+                    if !has_marker {
+                        super::pr_review::clear_resume_pending_marker(
+                            &config.workspace_root,
+                            &candidate.task_id,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn auto_rebase_phase(
@@ -4159,6 +4757,7 @@ mod tests {
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
+            pr_review_whitelist: vec![],
         };
 
         let cancel = CancellationToken::new();
@@ -4249,6 +4848,7 @@ mod tests {
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
+            pr_review_whitelist: vec![],
         };
 
         // Counter that the task increments; if it continues running after
