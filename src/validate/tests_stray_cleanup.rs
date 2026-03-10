@@ -216,7 +216,7 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 EOF
   echo "quick-dev-fixed" >> mock_file.txt
   git add mock_file.txt
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'

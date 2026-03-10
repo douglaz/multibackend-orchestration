@@ -156,7 +156,7 @@ elif printf '%s' "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif printf '%s' "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
+elif printf '%s' "$INPUT" | grep -q "You are a code reviewer. Review"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 

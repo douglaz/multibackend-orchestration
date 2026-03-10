@@ -227,7 +227,7 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]] \
+elif [[ "$prompt" == *"You are a code reviewer. Review"* ]] \
   || [[ "$prompt" == *"You are a technical evaluator assessing proposed amendments from final reviewers."* ]] \
   || [[ "$prompt" == *"You are a reviewer voting on proposed amendments after considering the planner's positions."* ]] \
   || [[ "$prompt" == *"You are the arbiter resolving disputed amendments where reviewers and planner disagree."* ]]; then
@@ -280,7 +280,7 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
+elif [[ "$prompt" == *"You are a code reviewer. Review"* ]]; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 

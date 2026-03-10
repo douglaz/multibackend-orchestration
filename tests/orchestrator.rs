@@ -2936,7 +2936,7 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
 ## Acceptance Criteria Verification
 Project-level acceptance requirements are satisfied.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
+elif [[ "$prompt" == *"You are a code reviewer. Review"* ]]; then
   total=$(inc_counter "final_reviewer_total")
   inc_counter "final_reviewer_${backend_id}" >/dev/null
   round=$(( (total - 1) / 2 + 1 ))
