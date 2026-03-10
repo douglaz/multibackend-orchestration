@@ -118,12 +118,20 @@ pub fn stage_amendment(
         ))
     })?;
 
+    // Deterministic filename from amendment ID — makes staging idempotent so
+    // that a crash between stage and dedup-state persist cannot produce
+    // duplicate files on the next poll cycle.
     let filename = format!(
-        "{}-{}.json",
-        crate::util::time::now_timestamp_yyyymmddhhmmss(),
+        "{}.json",
         crate::project::amendments::sanitize_id(&amendment.id),
     );
     let path = dir.join(filename);
+
+    // Idempotent: if already staged for this comment key, skip.
+    if path.exists() {
+        return Ok(());
+    }
+
     let json = serde_json::to_string_pretty(amendment).map_err(|err| {
         RalphError::Orchestration(format!("failed to serialize staged amendment: {err}"))
     })?;
@@ -296,6 +304,53 @@ pub fn reset_project_state_for_resume(
     })?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Resume-pending marker
+// ---------------------------------------------------------------------------
+
+/// Marker file path used to track that a PR-review resume has been initiated
+/// (label swap happened) but dispatch has not yet completed.  This bridges the
+/// restart-drift gap: if the daemon crashes after swapping `ralph:completed` →
+/// `ralph:in-progress`, startup reconciliation converts `in-progress` → `ready`.
+/// The marker lets `pr_review_phase` recognise that `ralph:ready` issue as a
+/// pending PR-review resume rather than an unrelated ready project.
+fn resume_pending_marker_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    workspace_root
+        .join("daemon")
+        .join("pr-review-pending")
+        .join(format!("{task_id}.marker"))
+}
+
+/// Create the resume-pending marker before a label swap.
+pub fn set_resume_pending_marker(workspace_root: &Path, task_id: &str) -> Result<()> {
+    let path = resume_pending_marker_path(workspace_root, task_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to create pr-review-pending dir: {err}"
+            ))
+        })?;
+    }
+    fs::write(&path, b"").map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to write resume-pending marker {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Check whether a resume-pending marker exists for a task.
+pub fn has_resume_pending_marker(workspace_root: &Path, task_id: &str) -> bool {
+    resume_pending_marker_path(workspace_root, task_id).exists()
+}
+
+/// Remove the resume-pending marker after a successful dispatch.
+pub fn clear_resume_pending_marker(workspace_root: &Path, task_id: &str) {
+    let path = resume_pending_marker_path(workspace_root, task_id);
+    let _ = fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,5 +1222,49 @@ mod tests {
         assert_eq!(json, "\"pr-review\"");
         let parsed: AmendmentSource = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, AmendmentSource::PrReview);
+    }
+
+    #[test]
+    fn stage_amendment_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+
+        // Stage twice with the same amendment ID.
+        stage_amendment(ws_root, task_id, &amendment).expect("stage 1");
+        stage_amendment(ws_root, task_id, &amendment).expect("stage 2");
+
+        // Only one file should exist in the staging directory.
+        let staging = staging_dir(ws_root, task_id);
+        let count = fs::read_dir(&staging)
+            .expect("read staging dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .count();
+        assert_eq!(count, 1, "idempotent staging must produce exactly one file");
+    }
+
+    #[test]
+    fn resume_pending_marker_roundtrip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        assert!(!has_resume_pending_marker(ws_root, task_id));
+
+        set_resume_pending_marker(ws_root, task_id).expect("set marker");
+        assert!(has_resume_pending_marker(ws_root, task_id));
+
+        clear_resume_pending_marker(ws_root, task_id);
+        assert!(!has_resume_pending_marker(ws_root, task_id));
     }
 }

@@ -1376,7 +1376,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
-    _origin: DispatchOrigin,
+    origin: DispatchOrigin,
 ) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
@@ -1453,17 +1453,17 @@ async fn dispatch_task(
         spawn_blocking_op(move || Ok(should_resume_issue_project(&wt, &pid))).await?
     };
 
-    // Drain any staged PR review amendments into the project's amendment queue,
-    // and reset project state so the orchestrator doesn't short-circuit on Completed.
-    // Runs for any dispatch origin whenever staged files exist — this handles
-    // the restart-drift scenario where startup reconciliation converts
-    // in-progress → ready and poll_and_claim dispatches with DispatchOrigin::Claim.
+    // Drain any staged PR review amendments into the project's amendment queue.
+    // State reset (status → InProgress, quick_dev_phase reset) is only performed
+    // for PrReviewResume dispatches to avoid mutating legitimately resumable
+    // non-completed projects dispatched via normal Claim flow.
     let drained_count = {
         let ws = config.workspace_root.clone();
         let tid = task_id.clone();
         let pid = project_id.clone();
         let wt = wt_path.clone();
         let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
+        let should_reset = origin == DispatchOrigin::PrReviewResume;
         let drained = spawn_blocking_op(move || {
             if !super::pr_review::has_staged_amendments(&ws, &tid) {
                 return Ok(0);
@@ -1472,7 +1472,7 @@ async fn dispatch_task(
             if project_dir.exists() {
                 let count =
                     super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
-                if count > 0 {
+                if count > 0 && should_reset {
                     super::pr_review::reset_project_state_for_resume(&project_dir, is_quick)?;
                 }
                 Ok(count)
@@ -2633,12 +2633,18 @@ async fn pr_review_phase(
             }
         };
 
-        // Resume projects labeled ralph:completed or ralph:ready (the latter
-        // handles the restart-drift case where startup reconciliation converted
-        // in-progress → ready before PR-review resume could complete).
+        // Resume projects labeled ralph:completed, or ralph:ready only when a
+        // resume-pending marker exists (restart-drift: label was swapped to
+        // in-progress but daemon crashed before dispatch, then startup
+        // reconciliation converted in-progress → ready).
         let from_label = if labels.iter().any(|l| l == "ralph:completed") {
             "ralph:completed"
-        } else if labels.iter().any(|l| l == "ralph:ready") {
+        } else if labels.iter().any(|l| l == "ralph:ready")
+            && super::pr_review::has_resume_pending_marker(
+                &config.workspace_root,
+                &candidate.task_id,
+            )
+        {
             "ralph:ready"
         } else {
             continue;
@@ -2648,6 +2654,21 @@ async fn pr_review_phase(
             "pr-review: resuming {from_label} task {} with staged amendment(s)",
             candidate.task_id
         );
+
+        // Set resume-pending marker before label swap so that restart-drift
+        // (completed → in-progress → [crash] → ready) can be detected.
+        if from_label == "ralph:completed" {
+            if let Err(err) = super::pr_review::set_resume_pending_marker(
+                &config.workspace_root,
+                &candidate.task_id,
+            ) {
+                eprintln!(
+                    "warning: failed to set resume-pending marker for {}: {err}",
+                    candidate.task_id
+                );
+                continue;
+            }
+        }
 
         // Swap label: ralph:{completed|ready} -> ralph:in-progress
         if let Err(err) = github::swap_lifecycle_label(
@@ -2677,6 +2698,10 @@ async fn pr_review_phase(
         {
             Ok(handle) => {
                 children.insert(candidate.issue_number, handle);
+                super::pr_review::clear_resume_pending_marker(
+                    &config.workspace_root,
+                    &candidate.task_id,
+                );
                 eprintln!(
                     "pr-review: dispatched task {} for PR review amendments",
                     candidate.task_id
