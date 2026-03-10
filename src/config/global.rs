@@ -3675,12 +3675,8 @@ planner_state_in_prompt = "summary"
         );
 
         // Setting to empty list should clear.
-        set_global_config_value(
-            &mut config,
-            "workspace.daemon_pr_review_whitelist",
-            "[]",
-        )
-        .expect("set empty whitelist should succeed");
+        set_global_config_value(&mut config, "workspace.daemon_pr_review_whitelist", "[]")
+            .expect("set empty whitelist should succeed");
         assert!(config.workspace.daemon_pr_review_whitelist.is_empty());
     }
 

@@ -8,8 +8,7 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    quick_dev_final_review_always_issues_script,
-    quick_dev_final_review_issues_once_logging_script,
+    quick_dev_final_review_always_issues_script, quick_dev_final_review_issues_once_logging_script,
     quick_dev_final_review_issues_once_script, quick_dev_implementer_mock_script,
     quick_dev_reviewer_always_reject_script, quick_dev_reviewer_mock_script,
     quick_dev_reviewer_reject_once_script,
@@ -1763,8 +1762,7 @@ fn final_review_handoff_injected_on_reloop(h: &RalphHarness) -> TestResult {
         assert_file_exists(&prompt_log_file);
 
         // The logged prompt must contain the final review handoff
-        let prompt_content =
-            fs::read_to_string(&prompt_log_file).expect("read prompt log");
+        let prompt_content = fs::read_to_string(&prompt_log_file).expect("read prompt log");
         assert!(
             prompt_content.contains("Final Review Handoff"),
             "re-entry prompt must contain 'Final Review Handoff'; prompt:\n{prompt_content}"

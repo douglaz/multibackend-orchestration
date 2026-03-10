@@ -6,9 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::daemon::github::{
-    self, extract_pr_number, CommentEndpoint, PrReviewComment,
-};
+use crate::daemon::github::{self, extract_pr_number, CommentEndpoint, PrReviewComment};
 use crate::daemon::runtime::{DaemonRuntimeConfig, TaskMetadata};
 use crate::daemon::TaskHandle;
 use crate::error::RalphError;
@@ -57,9 +55,7 @@ impl PrReviewState {
         let path = state_path(workspace_root, task_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
-                RalphError::Orchestration(format!(
-                    "failed to create pr-review-state dir: {err}"
-                ))
+                RalphError::Orchestration(format!("failed to create pr-review-state dir: {err}"))
             })?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|err| {
@@ -260,12 +256,7 @@ pub fn has_staged_amendments(workspace_root: &Path, task_id: &str) -> bool {
         .map(|mut entries| {
             entries.any(|e| {
                 e.ok()
-                    .and_then(|entry| {
-                        entry
-                            .path()
-                            .extension()
-                            .map(|ext| ext == "json")
-                    })
+                    .and_then(|entry| entry.path().extension().map(|ext| ext == "json"))
                     .unwrap_or(false)
             })
         })
@@ -300,10 +291,7 @@ pub fn clear_staged_amendments(workspace_root: &Path, task_id: &str) {
 ///
 /// For regular projects:
 ///   - `status` → `InProgress`
-pub fn reset_project_state_for_resume(
-    project_dir: &Path,
-    is_quick: bool,
-) -> Result<()> {
+pub fn reset_project_state_for_resume(project_dir: &Path, is_quick: bool) -> Result<()> {
     let state_path = project_dir.join("state.json");
     if !state_path.exists() {
         return Ok(());
@@ -326,8 +314,7 @@ pub fn reset_project_state_for_resume(
     state["status"] = serde_json::Value::String("in_progress".to_string());
 
     if is_quick {
-        state["quick_dev_phase"] =
-            serde_json::Value::String("plan_and_implement".to_string());
+        state["quick_dev_phase"] = serde_json::Value::String("plan_and_implement".to_string());
         state["current_phase"] = serde_json::Value::String("implementing".to_string());
         // Reset retry counters so the orchestrator does not immediately
         // force-complete due to stale values from a previous run.
@@ -382,9 +369,7 @@ pub fn set_resume_pending_marker(workspace_root: &Path, task_id: &str) -> Result
     let path = resume_pending_marker_path(workspace_root, task_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to create pr-review-pending dir: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to create pr-review-pending dir: {err}"))
         })?;
     }
     fs::write(&path, b"").map_err(|err| {
@@ -412,33 +397,28 @@ pub fn clear_resume_pending_marker(workspace_root: &Path, task_id: &str) {
 // ---------------------------------------------------------------------------
 
 /// Convert a PR review comment into an `AmendmentRequest`.
-pub fn comment_to_amendment(
-    comment: &PrReviewComment,
-    pr_number: u32,
-) -> AmendmentRequest {
+pub fn comment_to_amendment(comment: &PrReviewComment, pr_number: u32) -> AmendmentRequest {
     let body = match comment.endpoint {
-        CommentEndpoint::PullComment => {
-            match (&comment.path, comment.line) {
-                (Some(path), Some(line)) => {
-                    format!(
-                        "PR review comment by @{} on {}:{}:\n\n{}",
-                        comment.author, path, line, comment.body
-                    )
-                }
-                (Some(path), None) => {
-                    format!(
-                        "PR review comment by @{} on {}:\n\n{}",
-                        comment.author, path, comment.body
-                    )
-                }
-                _ => {
-                    format!(
-                        "PR review comment by @{}:\n\n{}",
-                        comment.author, comment.body
-                    )
-                }
+        CommentEndpoint::PullComment => match (&comment.path, comment.line) {
+            (Some(path), Some(line)) => {
+                format!(
+                    "PR review comment by @{} on {}:{}:\n\n{}",
+                    comment.author, path, line, comment.body
+                )
             }
-        }
+            (Some(path), None) => {
+                format!(
+                    "PR review comment by @{} on {}:\n\n{}",
+                    comment.author, path, comment.body
+                )
+            }
+            _ => {
+                format!(
+                    "PR review comment by @{}:\n\n{}",
+                    comment.author, comment.body
+                )
+            }
+        },
         CommentEndpoint::IssueComment => {
             format!(
                 "PR review comment by @{}:\n\n{}",
@@ -594,15 +574,14 @@ pub async fn poll_pr_reviews(
     }
 
     // Resolve authenticated login once per poll cycle.
-    let self_login =
-        match github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).await {
-            Ok(login) => login,
-            Err(err) => {
-                return Err(RalphError::Orchestration(format!(
-                    "failed to resolve authenticated GitHub login for PR review polling: {err}"
-                )));
-            }
-        };
+    let self_login = match github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).await {
+        Ok(login) => login,
+        Err(err) => {
+            return Err(RalphError::Orchestration(format!(
+                "failed to resolve authenticated GitHub login for PR review polling: {err}"
+            )));
+        }
+    };
 
     let tasks = discover_tasks_with_prs(&config.workspace_root, &config.owner, &config.repo);
     if tasks.is_empty() {
@@ -688,7 +667,10 @@ pub async fn poll_pr_reviews(
             }
 
             // Skip non-whitelisted users (case-insensitive).
-            if !whitelist.iter().any(|w| w.eq_ignore_ascii_case(&comment.author)) {
+            if !whitelist
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(&comment.author))
+            {
                 continue;
             }
 
@@ -705,7 +687,9 @@ pub async fn poll_pr_reviews(
 
             // Convert to amendment and stage.
             let amendment = comment_to_amendment(comment, task_info.pr_number);
-            if let Err(err) = stage_amendment(&config.workspace_root, &task_info.task_id, &amendment) {
+            if let Err(err) =
+                stage_amendment(&config.workspace_root, &task_info.task_id, &amendment)
+            {
                 eprintln!(
                     "warning: failed to stage PR review amendment for {} comment {}: {err}",
                     task_info.task_id, comment.id
@@ -737,8 +721,8 @@ pub async fn poll_pr_reviews(
                     "{}.json",
                     crate::project::amendments::sanitize_id(&amendment.id),
                 );
-                let staged_path = staging_dir(&config.workspace_root, &task_info.task_id)
-                    .join(staged_filename);
+                let staged_path =
+                    staging_dir(&config.workspace_root, &task_info.task_id).join(staged_filename);
                 if let Err(rm_err) = fs::remove_file(&staged_path) {
                     warn!(
                         task_id = %task_info.task_id,
@@ -883,12 +867,8 @@ mod tests {
         let task_id = "owner-repo-42";
 
         let mut state = PrReviewState::default();
-        state
-            .processed_keys
-            .insert("pull_comment:100".to_string());
-        state
-            .processed_keys
-            .insert("issue_comment:200".to_string());
+        state.processed_keys.insert("pull_comment:100".to_string());
+        state.processed_keys.insert("issue_comment:200".to_string());
 
         state.save(ws_root, task_id).expect("save");
 
@@ -997,7 +977,10 @@ mod tests {
         // Drain (copies without deleting — staged files survive for retry)
         let count = drain_staged_amendments(ws_root, task_id, &project_dir).expect("drain");
         assert_eq!(count, 1);
-        assert!(has_staged_amendments(ws_root, task_id), "drain is copy-only");
+        assert!(
+            has_staged_amendments(ws_root, task_id),
+            "drain is copy-only"
+        );
 
         // Verify amendment landed in queue
         let queue_dir = project_dir.join("amendment-queue");
@@ -1084,7 +1067,10 @@ mod tests {
         stage_amendment(ws_root, task_id, &amendment2).expect("second stage");
 
         let after = fs::read_to_string(dir.join(&filename)).expect("read after");
-        assert_eq!(original, after, "valid existing file should not be overwritten");
+        assert_eq!(
+            original, after,
+            "valid existing file should not be overwritten"
+        );
     }
 
     #[test]
@@ -1204,7 +1190,9 @@ mod tests {
         let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
         assert_eq!(loaded["status"], "in_progress");
         // quick_dev_phase should not be set for regular projects
-        assert!(loaded.get("quick_dev_phase").map_or(true, |v| v.is_null() || v.as_str() == Some("completing")));
+        assert!(loaded
+            .get("quick_dev_phase")
+            .map_or(true, |v| v.is_null() || v.as_str() == Some("completing")));
     }
 
     #[test]
@@ -1483,7 +1471,12 @@ mod tests {
         let count = fs::read_dir(&staging)
             .expect("read staging dir")
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
+            })
             .count();
         assert_eq!(count, 1, "idempotent staging must produce exactly one file");
     }

@@ -1175,15 +1175,10 @@ async fn poll_and_claim(
         // pr_review_phase cannot dispatch this issue — so we must NOT block
         // the claim path.  In that case we warn and clear stale artifacts.
         if !config.pr_review_whitelist.is_empty() {
-            let task_id =
-                super::format_task_id(&config.owner, &config.repo, issue.number);
-            let has_marker_or_staged = super::pr_review::has_resume_pending_marker(
-                &config.workspace_root,
-                &task_id,
-            ) || super::pr_review::has_staged_amendments(
-                &config.workspace_root,
-                &task_id,
-            );
+            let task_id = super::format_task_id(&config.owner, &config.repo, issue.number);
+            let has_marker_or_staged =
+                super::pr_review::has_resume_pending_marker(&config.workspace_root, &task_id)
+                    || super::pr_review::has_staged_amendments(&config.workspace_root, &task_id);
             if has_marker_or_staged {
                 // Verify pr_review_phase can actually own this issue: task
                 // metadata must exist with a pr_url, and that PR must be open.
@@ -1263,10 +1258,7 @@ async fn poll_and_claim(
                             &config.workspace_root,
                             &task_id,
                         );
-                        super::pr_review::clear_staged_amendments(
-                            &config.workspace_root,
-                            &task_id,
-                        );
+                        super::pr_review::clear_staged_amendments(&config.workspace_root, &task_id);
                     }
                 }
             }
@@ -1636,8 +1628,7 @@ async fn dispatch_task(
             }
             let project_dir = wt.join(".ralph").join("projects").join(&pid);
             if project_dir.exists() {
-                let count =
-                    super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
+                let count = super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
                 if count > 0 {
                     super::pr_review::reset_project_state_for_resume(&project_dir, is_quick)?;
                 }
@@ -1648,9 +1639,7 @@ async fn dispatch_task(
         })
         .await?;
         if drained > 0 {
-            eprintln!(
-                "dispatch: drained {drained} staged PR review amendment(s) for {task_id}"
-            );
+            eprintln!("dispatch: drained {drained} staged PR review amendment(s) for {task_id}");
         }
         drained
     } else {
@@ -1689,7 +1678,9 @@ async fn dispatch_task(
             {
                 Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
                 Err(err) => {
-                    eprintln!("warning: refinement failed for task {task_id}, using raw idea: {err}");
+                    eprintln!(
+                        "warning: refinement failed for task {task_id}, using raw idea: {err}"
+                    );
                     (raw_idea.to_owned(), None, None)
                 }
             }
@@ -1709,7 +1700,8 @@ async fn dispatch_task(
         // Update GitHub issue body with cleaned body (best-effort)
         if let Some(ref cleaned_body) = cleaned_body {
             if let Err(err) =
-                github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body).await
+                github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body)
+                    .await
             {
                 eprintln!("warning: failed to update issue body for {task_id}: {err}");
             }
@@ -2685,16 +2677,16 @@ async fn pr_review_phase(
         match super::pr_review::poll_pr_reviews(config, children, &mut pr_open_cache).await {
             Ok(results) => results,
             Err(err) => {
-                eprintln!("warning: PR review polling failed, continuing with staged amendments: {err}");
+                eprintln!(
+                    "warning: PR review polling failed, continuing with staged amendments: {err}"
+                );
                 Vec::new()
             }
         };
 
     // Build the set of task_ids that received new amendments this cycle.
-    let newly_staged: std::collections::HashSet<String> = poll_results
-        .iter()
-        .map(|r| r.task_id.clone())
-        .collect();
+    let newly_staged: std::collections::HashSet<String> =
+        poll_results.iter().map(|r| r.task_id.clone()).collect();
 
     // Also discover tasks with previously-staged amendments (deferred on earlier
     // cycles due to capacity or other transient issues).
@@ -2787,9 +2779,7 @@ async fn pr_review_phase(
         }
 
         // Check capacity.
-        let slots = config
-            .max_concurrent
-            .saturating_sub(children.len() as u32);
+        let slots = config.max_concurrent.saturating_sub(children.len() as u32);
         if slots == 0 {
             eprintln!(
                 "PR review amendments pending for {} but no capacity slots available; deferring",
@@ -2859,22 +2849,16 @@ async fn pr_review_phase(
         // is present, a prior swap removed the label and both forward-add and
         // rollback-add failed, stranding the issue.  Re-add ralph:ready so the
         // normal swap path can proceed.
-        let has_marker = super::pr_review::has_resume_pending_marker(
-            &config.workspace_root,
-            &candidate.task_id,
-        );
-        let has_staged = super::pr_review::has_staged_amendments(
-            &config.workspace_root,
-            &candidate.task_id,
-        );
+        let has_marker =
+            super::pr_review::has_resume_pending_marker(&config.workspace_root, &candidate.task_id);
+        let has_staged =
+            super::pr_review::has_staged_amendments(&config.workspace_root, &candidate.task_id);
         let no_lifecycle = lifecycle.is_empty();
 
         let mut labels = labels;
         let from_label = if labels.iter().any(|l| l == "ralph:completed") {
             "ralph:completed"
-        } else if labels.iter().any(|l| l == "ralph:ready")
-            && (has_marker || has_staged)
-        {
+        } else if labels.iter().any(|l| l == "ralph:ready") && (has_marker || has_staged) {
             "ralph:ready"
         } else if no_lifecycle && has_marker {
             // Stranded issue: marker present but no lifecycle label.
@@ -2954,9 +2938,7 @@ async fn pr_review_phase(
             //    - Some(false): rollback explicitly failed — label is missing.
             //    In both ambiguous/failed cases, keep the marker so restart
             //    recovery can detect the stranded state and retry next cycle.
-            let label_confirmed_restored = swap_err
-                .from_label_restored
-                == Some(true);
+            let label_confirmed_restored = swap_err.from_label_restored == Some(true);
             if !has_marker && label_confirmed_restored {
                 super::pr_review::clear_resume_pending_marker(
                     &config.workspace_root,
@@ -2972,8 +2954,15 @@ async fn pr_review_phase(
 
         // Dispatch the task. State reset and amendment drain happen inside dispatch_task
         // after worktree creation and before task spawn.
-        match dispatch_task(config, candidate.issue_number, &raw_idea, &labels, repo_root_lock, DispatchOrigin::PrReviewResume)
-            .await
+        match dispatch_task(
+            config,
+            candidate.issue_number,
+            &raw_idea,
+            &labels,
+            repo_root_lock,
+            DispatchOrigin::PrReviewResume,
+        )
+        .await
         {
             Ok(handle) => {
                 children.insert(candidate.issue_number, handle);

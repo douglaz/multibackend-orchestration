@@ -97,8 +97,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 /// staged amendments and that non-whitelisted/self-comments are absent.
 fn whitelist_filters_comments(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
         // Configure whitelist.
@@ -218,8 +217,7 @@ fn whitelist_filters_comments(h: &RalphHarness) -> TestResult {
 /// ralph:in-progress occurs and the dispatch is attempted.
 fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -263,8 +261,7 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
         // Issue has ralph:completed label so pr_review_phase triggers resume.
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -333,8 +330,7 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
                 .join("issue-42")
                 .join("state.json");
             if state_path.exists() {
-                let content =
-                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let content = fs::read_to_string(&state_path).expect("read worktree state.json");
                 let loaded: serde_json::Value =
                     serde_json::from_str(&content).expect("parse state");
                 assert_eq!(
@@ -356,8 +352,7 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
 /// second tick does not create duplicate amendments.
 fn dedup_across_restart(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
         dh.ralph_ok([
@@ -373,8 +368,7 @@ fn dedup_across_restart(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let issue_comments =
-            r#"[{"id":500,"user":{"login":"alice"},"body":"fix this","created_at":"2024-01-01T00:00:00Z"}]"#;
+        let issue_comments = r#"[{"id":500,"user":{"login":"alice"},"body":"fix this","created_at":"2024-01-01T00:00:00Z"}]"#;
 
         // Cycle 1: first daemon tick should stage the amendment.
         let output = dh
@@ -403,7 +397,10 @@ fn dedup_across_restart(h: &RalphHarness) -> TestResult {
             .join("pr-review-amendments")
             .join("acme-widgets-10");
         let count_after_first = count_json_files(&staging_dir);
-        assert_eq!(count_after_first, 1, "should have 1 staged amendment after first tick");
+        assert_eq!(
+            count_after_first, 1,
+            "should have 1 staged amendment after first tick"
+        );
 
         // Verify dedup state persisted.
         let state = PrReviewState::load(&ws_root, "acme-widgets-10").expect("load dedup state");
@@ -448,8 +445,7 @@ fn dedup_across_restart(h: &RalphHarness) -> TestResult {
 /// the second should be deferred with staged amendments preserved.
 fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -491,8 +487,7 @@ fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -548,8 +543,7 @@ fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
 /// so the orchestrator does not short-circuit.
 fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -590,8 +584,7 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -649,8 +642,7 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
                 .join("issue-55")
                 .join("state.json");
             if state_path.exists() {
-                let content =
-                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let content = fs::read_to_string(&state_path).expect("read worktree state.json");
                 let loaded: serde_json::Value =
                     serde_json::from_str(&content).expect("parse state");
                 assert_eq!(
@@ -682,8 +674,7 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
 /// `ralph:completed`.
 fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -736,8 +727,7 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         let label_log = dh.temp_dir.path().join("fail_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -796,18 +786,47 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
             lines.len()
         );
         // Forward swap: remove completed, then add in-progress.
-        let fwd_remove = lines.iter().position(|l| l.contains("--remove-label") && l.contains("ralph:completed"));
-        let fwd_add = lines.iter().position(|l| l.contains("--add-label") && l.contains("ralph:in-progress"));
-        assert!(fwd_remove.is_some(), "forward swap should remove ralph:completed, got: {log_content}");
-        assert!(fwd_add.is_some(), "forward swap should add ralph:in-progress, got: {log_content}");
-        assert!(fwd_remove.unwrap() < fwd_add.unwrap(), "remove completed must precede add in-progress");
+        let fwd_remove = lines
+            .iter()
+            .position(|l| l.contains("--remove-label") && l.contains("ralph:completed"));
+        let fwd_add = lines
+            .iter()
+            .position(|l| l.contains("--add-label") && l.contains("ralph:in-progress"));
+        assert!(
+            fwd_remove.is_some(),
+            "forward swap should remove ralph:completed, got: {log_content}"
+        );
+        assert!(
+            fwd_add.is_some(),
+            "forward swap should add ralph:in-progress, got: {log_content}"
+        );
+        assert!(
+            fwd_remove.unwrap() < fwd_add.unwrap(),
+            "remove completed must precede add in-progress"
+        );
         // Rollback swap: remove in-progress, then add completed.
-        let rb_remove = lines.iter().rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
-        let rb_add = lines.iter().rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
-        assert!(rb_remove.is_some(), "rollback swap should remove ralph:in-progress, got: {log_content}");
-        assert!(rb_add.is_some(), "rollback swap should add ralph:completed, got: {log_content}");
-        assert!(rb_remove.unwrap() < rb_add.unwrap(), "remove in-progress must precede add completed in rollback");
-        assert!(fwd_add.unwrap() < rb_remove.unwrap(), "forward swap must complete before rollback begins");
+        let rb_remove = lines
+            .iter()
+            .rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
+        let rb_add = lines
+            .iter()
+            .rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
+        assert!(
+            rb_remove.is_some(),
+            "rollback swap should remove ralph:in-progress, got: {log_content}"
+        );
+        assert!(
+            rb_add.is_some(),
+            "rollback swap should add ralph:completed, got: {log_content}"
+        );
+        assert!(
+            rb_remove.unwrap() < rb_add.unwrap(),
+            "remove in-progress must precede add completed in rollback"
+        );
+        assert!(
+            fwd_add.unwrap() < rb_remove.unwrap(),
+            "forward swap must complete before rollback begins"
+        );
 
         // Verify resume-pending marker is cleared after successful rollback.
         // A stale marker would cause repeated re-dispatch attempts on subsequent
@@ -826,8 +845,7 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
 /// guard-at-entry force-complete path.
 fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -868,8 +886,7 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -927,8 +944,7 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
                 .join("issue-60")
                 .join("state.json");
             if state_path.exists() {
-                let content =
-                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let content = fs::read_to_string(&state_path).expect("read worktree state.json");
                 let loaded: serde_json::Value =
                     serde_json::from_str(&content).expect("parse state");
                 assert_eq!(
@@ -969,8 +985,7 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
 /// amendments) and drains them on the next tick.
 fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1019,8 +1034,7 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
         // Create the resume-pending marker to simulate that the previous
         // PR-review resume initiated a label swap before the daemon crashed.
         // Without this marker, runtime gates ralph:ready reactivation.
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         let label_log = dh.temp_dir.path().join("drift_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1030,8 +1044,7 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
         // Issue has ralph:ready label — simulating post-restart reconciliation
         // (the original ralph:completed was swapped to ralph:in-progress, then
         // startup reconciliation converted it to ralph:ready).
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1094,8 +1107,7 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
 /// Staged amendments must remain in the staging directory untouched.
 fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1135,7 +1147,8 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
 
         // Issue has ralph:ready label — claim phase would normally dispatch it,
         // but the staged PR-review amendments guard prevents this.
-        let issues_json = r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+        let issues_json =
+            r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
 
         let output = dh
             .daemon_env(
@@ -1185,8 +1198,7 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
 /// rolled back and staged amendments are preserved.
 fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1240,8 +1252,7 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1296,11 +1307,24 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
             lines.len()
         );
         // Rollback must add ralph:completed after removing ralph:in-progress.
-        let rb_remove = lines.iter().rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
-        let rb_add = lines.iter().rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
-        assert!(rb_remove.is_some(), "rollback should remove ralph:in-progress, got: {log_content}");
-        assert!(rb_add.is_some(), "rollback should add ralph:completed, got: {log_content}");
-        assert!(rb_remove.unwrap() < rb_add.unwrap(), "remove in-progress must precede add completed in rollback");
+        let rb_remove = lines
+            .iter()
+            .rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
+        let rb_add = lines
+            .iter()
+            .rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
+        assert!(
+            rb_remove.is_some(),
+            "rollback should remove ralph:in-progress, got: {log_content}"
+        );
+        assert!(
+            rb_add.is_some(),
+            "rollback should add ralph:completed, got: {log_content}"
+        );
+        assert!(
+            rb_remove.unwrap() < rb_add.unwrap(),
+            "remove in-progress must precede add completed in rollback"
+        );
     })
 }
 
@@ -1309,8 +1333,7 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
 /// marker should still cause re-dispatch on next startup.
 fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1335,8 +1358,7 @@ fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
         );
 
         // Set the resume-pending marker — the durable recovery signal.
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         let label_log = dh.temp_dir.path().join("crash_recovery_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1346,8 +1368,7 @@ fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
         // Issue has ralph:ready label — simulating post-restart reconciliation
         // (the in-progress label from the previous dispatch was reconciled to
         // ralph:ready on startup).
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1413,8 +1434,7 @@ fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
 /// is active.
 fn partial_swap_failure_clears_marker_on_rollback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1457,8 +1477,7 @@ fn partial_swap_failure_clears_marker_on_rollback(h: &RalphHarness) -> TestResul
         // but succeeds on the rollback --add-label ralph:completed.
         let gh_path = write_partial_swap_mock_gh(&dh).expect("write partial swap mock gh");
 
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1539,8 +1558,7 @@ fn partial_swap_failure_clears_marker_on_rollback(h: &RalphHarness) -> TestResul
 /// the claim phase from taking ownership.
 fn ready_with_marker_skipped_by_claim(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1570,8 +1588,7 @@ fn ready_with_marker_skipped_by_claim(h: &RalphHarness) -> TestResult {
         );
 
         // Set resume-pending marker (simulates a previous cycle's marker).
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         // Pre-stage an amendment so pr_review_phase finds this task.
         let staging_dir = ws_root
@@ -1597,9 +1614,9 @@ fn ready_with_marker_skipped_by_claim(h: &RalphHarness) -> TestResult {
 
         // Issue has ralph:ready (simulating rollback after failed resume).
         // It also appears in the issue list so the claim phase would see it.
-        let issues_json = r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+        let issues_json =
+            r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
 
         let label_log = dh.temp_dir.path().join("claim_bypass.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1650,8 +1667,7 @@ fn ready_with_marker_skipped_by_claim(h: &RalphHarness) -> TestResult {
 /// rather than resuming from an ambiguous state.
 fn multi_lifecycle_normalized_in_pr_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1693,8 +1709,7 @@ fn multi_lifecycle_normalized_in_pr_review(h: &RalphHarness) -> TestResult {
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
         // Issue has BOTH ralph:completed and ralph:ready — ambiguous multi-lifecycle state.
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:ready"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:ready"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1757,8 +1772,7 @@ fn multi_lifecycle_normalized_in_pr_review(h: &RalphHarness) -> TestResult {
 /// by either path).
 fn ready_staged_no_marker_dispatches(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1806,8 +1820,7 @@ fn ready_staged_no_marker_dispatches(h: &RalphHarness) -> TestResult {
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
         // Issue has ralph:ready (NOT ralph:completed) and NO marker.
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1865,8 +1878,7 @@ fn ready_staged_no_marker_dispatches(h: &RalphHarness) -> TestResult {
 /// prior cycle, leaving the issue with no lifecycle label.
 fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         setup_mock_backend(&dh);
 
@@ -1903,8 +1915,7 @@ fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
         .expect("write staged amendment");
 
         // Set the resume-pending marker (simulating prior failed swap).
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         let label_log = dh.temp_dir.path().join("stranded_recovery.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1913,8 +1924,7 @@ fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
 
         // Issue has NO lifecycle label — only ralph:pr-review remains.
         // This simulates the stranded state after a failed swap+rollback.
-        let issue_labels =
-            r#"{"labels":[{"name":"ralph:pr-review"}]}"#;
+        let issue_labels = r#"{"labels":[{"name":"ralph:pr-review"}]}"#;
 
         let output = dh
             .daemon_env(
@@ -1949,10 +1959,7 @@ fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
 
         // Verify the label log shows ralph:ready was re-added and then
         // swapped to ralph:in-progress.
-        assert!(
-            label_log.exists(),
-            "label log should exist after recovery"
-        );
+        assert!(label_log.exists(), "label log should exist after recovery");
         let log_content = fs::read_to_string(&label_log).expect("read label log");
         assert!(
             log_content.contains("ralph:ready"),
@@ -1976,8 +1983,7 @@ fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
 /// issue should be silently skipped (deferred) for this cycle.
 fn transient_api_error_preserves_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
         // Configure whitelist so the PR-review guard in poll_and_claim is active.
@@ -2014,8 +2020,7 @@ fn transient_api_error_preserves_staged(h: &RalphHarness) -> TestResult {
         .expect("write staged amendment");
 
         // Set the resume-pending marker.
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
@@ -2079,8 +2084,7 @@ fn transient_api_error_preserves_staged(h: &RalphHarness) -> TestResult {
 /// instead of treating it as "metadata missing" and deleting artifacts.
 fn corrupt_metadata_preserves_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let dh =
-            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
         // Configure whitelist so the PR-review guard in poll_and_claim is active.
@@ -2124,8 +2128,7 @@ fn corrupt_metadata_preserves_staged(h: &RalphHarness) -> TestResult {
         .expect("write staged amendment");
 
         // Set the resume-pending marker.
-        set_resume_pending_marker(&ws_root, "acme-widgets-42")
-            .expect("set resume-pending marker");
+        set_resume_pending_marker(&ws_root, "acme-widgets-42").expect("set resume-pending marker");
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
@@ -2205,12 +2208,7 @@ fn count_json_files(dir: &Path) -> usize {
     fs::read_dir(dir)
         .unwrap_or_else(|_| panic!("read dir {}", dir.display()))
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "json")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
         .count()
 }
 
@@ -2557,9 +2555,7 @@ fn setup_task_metadata(ws_root: &Path, task_id: &str, pr_number: u32) {
     let tasks_dir = ws_root.join("daemon").join("tasks");
     fs::create_dir_all(&tasks_dir).expect("create tasks dir");
     let meta = TaskMetadata {
-        pr_url: Some(format!(
-            "https://github.com/acme/widgets/pull/{pr_number}"
-        )),
+        pr_url: Some(format!("https://github.com/acme/widgets/pull/{pr_number}")),
     };
     fs::write(
         tasks_dir.join(format!("{task_id}.json")),
@@ -2580,7 +2576,11 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .current_dir(repo_root)
         .output()
         .expect("git branch");
-    assert!(branch_out.status.success(), "git branch failed: {}", String::from_utf8_lossy(&branch_out.stderr));
+    assert!(
+        branch_out.status.success(),
+        "git branch failed: {}",
+        String::from_utf8_lossy(&branch_out.stderr)
+    );
 
     // Checkout branch, add project files, commit, checkout back.
     let checkout_out = Command::new("git")
@@ -2588,12 +2588,13 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .current_dir(repo_root)
         .output()
         .expect("git checkout branch");
-    assert!(checkout_out.status.success(), "git checkout branch failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
+    assert!(
+        checkout_out.status.success(),
+        "git checkout branch failed: {}",
+        String::from_utf8_lossy(&checkout_out.stderr)
+    );
 
-    let project_dir = repo_root
-        .join(".ralph")
-        .join("projects")
-        .join(&project_id);
+    let project_dir = repo_root.join(".ralph").join("projects").join(&project_id);
     fs::create_dir_all(&project_dir).expect("create project dir");
 
     // Write prompt.md (triggers resume detection).
@@ -2635,14 +2636,22 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .current_dir(repo_root)
         .output()
         .expect("git add");
-    assert!(add_out.status.success(), "git add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+    assert!(
+        add_out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
 
     let commit_out = Command::new("git")
         .args(["commit", "-m", "add project files for test"])
         .current_dir(repo_root)
         .output()
         .expect("git commit");
-    assert!(commit_out.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit_out.stderr));
+    assert!(
+        commit_out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_out.stderr)
+    );
 
     // Push to origin so that sync_project_branch finds the remote branch
     // and does not force-reset it to origin/master (which would wipe out
@@ -2652,7 +2661,11 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .current_dir(repo_root)
         .output()
         .expect("git push origin");
-    assert!(push_out.status.success(), "git push failed: {}", String::from_utf8_lossy(&push_out.stderr));
+    assert!(
+        push_out.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
 
     // Switch back to master.
     let checkout_out = Command::new("git")
@@ -2660,7 +2673,11 @@ fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
         .current_dir(repo_root)
         .output()
         .expect("git checkout master");
-    assert!(checkout_out.status.success(), "git checkout master failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
+    assert!(
+        checkout_out.status.success(),
+        "git checkout master failed: {}",
+        String::from_utf8_lossy(&checkout_out.stderr)
+    );
 }
 
 /// Like `setup_project_branch` with `is_quick=true`, but writes non-zero
@@ -2675,19 +2692,24 @@ fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32)
         .current_dir(repo_root)
         .output()
         .expect("git branch");
-    assert!(branch_out.status.success(), "git branch failed: {}", String::from_utf8_lossy(&branch_out.stderr));
+    assert!(
+        branch_out.status.success(),
+        "git branch failed: {}",
+        String::from_utf8_lossy(&branch_out.stderr)
+    );
 
     let checkout_out = Command::new("git")
         .args(["checkout", &branch])
         .current_dir(repo_root)
         .output()
         .expect("git checkout branch");
-    assert!(checkout_out.status.success(), "git checkout branch failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
+    assert!(
+        checkout_out.status.success(),
+        "git checkout branch failed: {}",
+        String::from_utf8_lossy(&checkout_out.stderr)
+    );
 
-    let project_dir = repo_root
-        .join(".ralph")
-        .join("projects")
-        .join(&project_id);
+    let project_dir = repo_root.join(".ralph").join("projects").join(&project_id);
     fs::create_dir_all(&project_dir).expect("create project dir");
 
     fs::write(
@@ -2727,14 +2749,22 @@ fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32)
         .current_dir(repo_root)
         .output()
         .expect("git add");
-    assert!(add_out.status.success(), "git add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+    assert!(
+        add_out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
 
     let commit_out = Command::new("git")
         .args(["commit", "-m", "add project files with stale counters"])
         .current_dir(repo_root)
         .output()
         .expect("git commit");
-    assert!(commit_out.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit_out.stderr));
+    assert!(
+        commit_out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_out.stderr)
+    );
 
     // Push to origin so that sync_project_branch finds the remote branch
     // and does not force-reset it to origin/master.
@@ -2743,14 +2773,22 @@ fn setup_project_branch_with_stale_counters(repo_root: &Path, issue_number: u32)
         .current_dir(repo_root)
         .output()
         .expect("git push origin");
-    assert!(push_out.status.success(), "git push failed: {}", String::from_utf8_lossy(&push_out.stderr));
+    assert!(
+        push_out.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&push_out.stderr)
+    );
 
     let checkout_out = Command::new("git")
         .args(["checkout", "master"])
         .current_dir(repo_root)
         .output()
         .expect("git checkout master");
-    assert!(checkout_out.status.success(), "git checkout master failed: {}", String::from_utf8_lossy(&checkout_out.stderr));
+    assert!(
+        checkout_out.status.success(),
+        "git checkout master failed: {}",
+        String::from_utf8_lossy(&checkout_out.stderr)
+    );
 }
 
 /// Set up a minimal mock backend so that dispatch_task can spawn a child process.
@@ -2771,14 +2809,8 @@ fn setup_mock_backend(dh: &RalphHarness) {
     dh.ralph_ok(["config", "set", "backends.codex.args", "[]"])
         .expect("set codex args");
     // Disable openrouter to avoid external calls.
-    dh.ralph_ok([
-        "config",
-        "set",
-        "backends.openrouter.command",
-        &script_str,
-    ])
-    .expect("set openrouter backend");
+    dh.ralph_ok(["config", "set", "backends.openrouter.command", &script_str])
+        .expect("set openrouter backend");
     dh.ralph_ok(["config", "set", "backends.openrouter.args", "[]"])
         .expect("set openrouter args");
 }
-

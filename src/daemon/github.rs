@@ -2366,9 +2366,7 @@ fn parse_pull_comments(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
     let parsed: Vec<RawPullComment> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(err) => {
-            eprintln!(
-                "warning: failed to parse inline review comments for PR #{pr_number}: {err}"
-            );
+            eprintln!("warning: failed to parse inline review comments for PR #{pr_number}: {err}");
             return Vec::new();
         }
     };
@@ -2408,9 +2406,7 @@ fn parse_issue_comments(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
     let parsed: Vec<RawIssueComment> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(err) => {
-            eprintln!(
-                "warning: failed to parse top-level PR comments for PR #{pr_number}: {err}"
-            );
+            eprintln!("warning: failed to parse top-level PR comments for PR #{pr_number}: {err}");
             return Vec::new();
         }
     };
@@ -2447,9 +2443,7 @@ fn parse_review_summaries(raw: &str, pr_number: u32) -> Vec<PrReviewComment> {
     let parsed: Vec<RawReview> = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(err) => {
-            eprintln!(
-                "warning: failed to parse review summaries for PR #{pr_number}: {err}"
-            );
+            eprintln!("warning: failed to parse review summaries for PR #{pr_number}: {err}");
             return Vec::new();
         }
     };
@@ -2518,9 +2512,7 @@ pub async fn fetch_pr_review_comments(
     {
         Ok(raw) => comments.extend(parse_issue_comments(&raw, pr_number)),
         Err(err) => {
-            eprintln!(
-                "warning: failed to fetch top-level PR comments for PR #{pr_number}: {err}"
-            );
+            eprintln!("warning: failed to fetch top-level PR comments for PR #{pr_number}: {err}");
         }
     }
 
@@ -2541,12 +2533,7 @@ pub async fn fetch_pr_review_comments(
 }
 
 /// Check whether a PR is open via the GitHub API.
-pub async fn is_pr_open(
-    owner: &str,
-    repo: &str,
-    pr_number: u32,
-    gh_bin: &str,
-) -> Result<bool> {
+pub async fn is_pr_open(owner: &str, repo: &str, pr_number: u32, gh_bin: &str) -> Result<bool> {
     let output = Command::new(gh_bin)
         .args([
             "api",
@@ -2621,9 +2608,8 @@ fn merge_paginated_json_arrays(raw: &str) -> Result<String> {
         }
     }
 
-    serde_json::to_string(&merged).map_err(|err| {
-        RalphError::Orchestration(format!("failed to serialize merged JSON: {err}"))
-    })
+    serde_json::to_string(&merged)
+        .map_err(|err| RalphError::Orchestration(format!("failed to serialize merged JSON: {err}")))
 }
 
 #[cfg(test)]
@@ -3421,10 +3407,7 @@ exit 0
         assert_eq!(comments.len(), 1, "only top-level comment should be kept");
         assert_eq!(comments[0].id, 100);
         assert_eq!(comments[0].author, "alice");
-        assert_eq!(
-            comments[0].endpoint,
-            super::CommentEndpoint::PullComment
-        );
+        assert_eq!(comments[0].endpoint, super::CommentEndpoint::PullComment);
     }
 
     #[test]
@@ -3583,7 +3566,10 @@ exit 0
     fn parse_pull_comments_returns_empty_on_malformed_json() {
         let json = r#"not valid json"#;
         let comments = super::parse_pull_comments(json, 42);
-        assert!(comments.is_empty(), "malformed JSON should return empty vec, not error");
+        assert!(
+            comments.is_empty(),
+            "malformed JSON should return empty vec, not error"
+        );
     }
 
     #[test]

@@ -1317,7 +1317,8 @@ fn load_final_review_findings(
     loop_slug: &str,
 ) -> Option<String> {
     let rev_body = load_role_findings_if_latest(project_dir, loop_number, loop_slug, "reviewer");
-    let impl_body = load_role_findings_if_latest(project_dir, loop_number, loop_slug, "implementer");
+    let impl_body =
+        load_role_findings_if_latest(project_dir, loop_number, loop_slug, "implementer");
 
     if rev_body.is_empty() && impl_body.is_empty() {
         return None;
@@ -2380,7 +2381,9 @@ mod tests {
     #[test]
     fn extract_artifact_timestamp_valid() {
         assert_eq!(
-            extract_artifact_timestamp("loops/001-demo/20260310100000-quick-dev-final-review-reviewer-issues.md"),
+            extract_artifact_timestamp(
+                "loops/001-demo/20260310100000-quick-dev-final-review-reviewer-issues.md"
+            ),
             Some("20260310100000")
         );
     }
