@@ -1153,50 +1153,70 @@ async fn poll_and_claim(
                 // Verify pr_review_phase can actually own this issue: task
                 // metadata must exist with a pr_url, and that PR must be open.
                 let meta = load_task_metadata(&config.workspace_root, &task_id);
-                let pr_can_own = if let Some(pr_url) = &meta.pr_url {
+                // Tri-state: Some(true) = PR open, Some(false) = PR closed/missing,
+                // None = transient error (unknown).
+                let pr_check_result = if let Some(pr_url) = &meta.pr_url {
                     if let Some(pr_number) = github::extract_pr_number(pr_url) {
-                        github::is_pr_open(
+                        match github::is_pr_open(
                             &config.owner,
                             &config.repo,
                             pr_number,
                             &config.gh_bin,
                         )
                         .await
-                        .unwrap_or(false)
+                        {
+                            Ok(true) => Some(true),
+                            Ok(false) => Some(false),
+                            Err(err) => {
+                                eprintln!(
+                                    "warning: transient error checking PR state for issue #{}: {err}; \
+                                     deferring claim to avoid clearing staged amendments",
+                                    issue.number
+                                );
+                                None
+                            }
+                        }
                     } else {
-                        false
+                        Some(false)
                     }
                 } else {
-                    false
+                    Some(false)
                 };
 
-                if pr_can_own {
-                    if config.verbose {
+                match pr_check_result {
+                    None => {
+                        // Transient error — do not clear artifacts, skip this
+                        // issue this cycle.
+                        continue;
+                    }
+                    Some(true) => {
+                        if config.verbose {
+                            eprintln!(
+                                "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
+                                 owned by pr_review_phase",
+                                issue.number
+                            );
+                        }
+                        continue;
+                    }
+                    Some(false) => {
+                        // PR is definitively closed/missing or metadata
+                        // unparseable — safe to clear stale artifacts.
                         eprintln!(
-                            "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
-                             owned by pr_review_phase",
+                            "warning: clearing stale PR-review artifacts for issue #{} — \
+                             task metadata missing or PR not open; allowing normal claim dispatch",
                             issue.number
                         );
+                        super::pr_review::clear_resume_pending_marker(
+                            &config.workspace_root,
+                            &task_id,
+                        );
+                        super::pr_review::clear_staged_amendments(
+                            &config.workspace_root,
+                            &task_id,
+                        );
                     }
-                    continue;
                 }
-
-                // pr_review_phase cannot own this issue (no task metadata,
-                // no pr_url, or PR is closed/merged).  Clear stale artifacts
-                // so the issue is not permanently blocked.
-                eprintln!(
-                    "warning: clearing stale PR-review artifacts for issue #{} — \
-                     task metadata missing or PR not open; allowing normal claim dispatch",
-                    issue.number
-                );
-                super::pr_review::clear_resume_pending_marker(
-                    &config.workspace_root,
-                    &task_id,
-                );
-                super::pr_review::clear_staged_amendments(
-                    &config.workspace_root,
-                    &task_id,
-                );
             }
         }
 

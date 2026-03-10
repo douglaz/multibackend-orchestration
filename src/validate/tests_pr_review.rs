@@ -77,6 +77,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::stranded_no_lifecycle_recovered_via_marker",
             func: stranded_no_lifecycle_recovered_via_marker,
         },
+        ConformanceTest {
+            name: "pr_review::transient_api_error_preserves_staged",
+            func: transient_api_error_preserves_staged,
+        },
     ]
 }
 
@@ -1963,6 +1967,109 @@ fn stranded_no_lifecycle_recovered_via_marker(h: &RalphHarness) -> TestResult {
     })
 }
 
+/// Verify that a transient GitHub API error during `poll_and_claim`'s PR state
+/// check does NOT clear staged amendments or the resume-pending marker.  The
+/// issue should be silently skipped (deferred) for this cycle.
+fn transient_api_error_preserves_staged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Configure whitelist so the PR-review guard in poll_and_claim is active.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        // Create task metadata with a PR URL.
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Set the resume-pending marker.
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue appears as ralph:ready in the issue list, so poll_and_claim
+        // would normally try to claim it.
+        let issues_json =
+            r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues_json),
+                    // Simulate transient API failure for PR state check.
+                    ("MOCK_GH_PR_STATE", "error"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify warning was logged about transient error.
+        assert!(
+            stderr.contains("transient error checking PR state for issue #42"),
+            "stderr should log transient error warning, got: {stderr}"
+        );
+
+        // Staged amendments MUST be preserved (not cleared).
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved after transient API error"
+        );
+
+        // Resume-pending marker MUST be preserved.
+        assert!(
+            has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker must be preserved after transient API error"
+        );
+
+        // The issue should NOT have been claimed (no label swap).
+        assert!(
+            !stderr.contains("dispatched task acme-widgets-42"),
+            "issue should not have been dispatched after transient error; stderr: {stderr}"
+        );
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2110,6 +2217,10 @@ case "$1" in
         ;;
       repos/*/pulls/*)
         # PR state check (is_pr_open uses --jq .state)
+        if [ "${MOCK_GH_PR_STATE:-open}" = "error" ]; then
+          echo "simulated API error: rate limit exceeded" >&2
+          exit 1
+        fi
         if [ "$has_jq" = "1" ]; then
           printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
           exit 0
