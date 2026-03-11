@@ -64,15 +64,15 @@ enabled = "auto"
 [backends.codex.env]
 
 [backends.codex.models]
-planner = "gpt-5.3-codex-xhigh"
-implementer = "gpt-5.3-codex-xhigh"
-reviewer = "gpt-5.3-codex-xhigh"
-final_reviewer = "gpt-5.3-codex-xhigh"
-arbiter = "gpt-5.3-codex-xhigh"
-qa = "gpt-5.3-codex-xhigh"
-completer = "gpt-5.3-codex-xhigh"
-acceptance_qa = "gpt-5.3-codex-xhigh"
-reformatter = "gpt-5.3-codex-medium"
+planner = "gpt-5.4-xhigh"
+implementer = "gpt-5.4-xhigh"
+reviewer = "gpt-5.4-xhigh"
+final_reviewer = "gpt-5.4-xhigh"
+arbiter = "gpt-5.4-xhigh"
+qa = "gpt-5.4-xhigh"
+completer = "gpt-5.4-xhigh"
+acceptance_qa = "gpt-5.4-xhigh"
+reformatter = "gpt-5.4-medium"
 
 [backends.codex.role_timeouts]
 
@@ -89,15 +89,15 @@ enabled = false
 [backends.openrouter.env]
 
 [backends.openrouter.models]
-planner = "gpt-5.3-codex-xhigh"
-implementer = "gpt-5.3-codex-xhigh"
-reviewer = "gpt-5.3-codex-xhigh"
-final_reviewer = "gpt-5.3-codex-xhigh"
-arbiter = "gpt-5.3-codex-xhigh"
-qa = "gpt-5.3-codex-xhigh"
-completer = "gpt-5.3-codex-xhigh"
-acceptance_qa = "gpt-5.3-codex-xhigh"
-reformatter = "gpt-5.3-codex-medium"
+planner = "gpt-5.4-xhigh"
+implementer = "gpt-5.4-xhigh"
+reviewer = "gpt-5.4-xhigh"
+final_reviewer = "gpt-5.4-xhigh"
+arbiter = "gpt-5.4-xhigh"
+qa = "gpt-5.4-xhigh"
+completer = "gpt-5.4-xhigh"
+acceptance_qa = "gpt-5.4-xhigh"
+reformatter = "gpt-5.4-medium"
 
 [backends.openrouter.role_timeouts]
 
