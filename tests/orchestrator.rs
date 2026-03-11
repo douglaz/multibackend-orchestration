@@ -1070,21 +1070,12 @@ async fn two_loop_happy_path_with_separate_backends() {
     // --- 2. Backend alternation (with role-model injection from defaults) ---
     // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
     assert_eq!(state.loops[0].backends.planner, "claude(opus)");
-    assert_eq!(
-        state.loops[0].backends.implementer,
-        "codex(gpt-5.3-codex-high)"
-    );
+    assert_eq!(state.loops[0].backends.implementer, "codex(gpt-5.4-high)");
     assert_eq!(state.loops[0].backends.reviewer, "claude(opus)");
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
-    assert_eq!(
-        state.loops[1].backends.planner,
-        "codex(gpt-5.3-codex-xhigh)"
-    );
+    assert_eq!(state.loops[1].backends.planner, "codex(gpt-5.4-xhigh)");
     assert_eq!(state.loops[1].backends.implementer, "claude(opus)");
-    assert_eq!(
-        state.loops[1].backends.reviewer,
-        "codex(gpt-5.3-codex-high)"
-    );
+    assert_eq!(state.loops[1].backends.reviewer, "codex(gpt-5.4-high)");
 
     // --- 3. Feature names ---
     assert_eq!(state.loops[0].feature_name, "Auth Module");
@@ -1572,7 +1563,7 @@ if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]];
   count=$((count + 1))
   echo "$count" > "$counter_file"
   args=" $* "
-  if [[ "$args" == *' -c model_reasoning_effort="medium" '* && "$args" == *" --model gpt-5.3-codex "* ]]; then
+  if [[ "$args" == *' -c model_reasoning_effort="medium" '* && "$args" == *" --model gpt-5.4 "* ]]; then
     model_counter_file="${COUNTER_DIR}/codex_reformat_model_count"
     model_count=0
     if [ -f "$model_counter_file" ]; then
@@ -1808,7 +1799,7 @@ async fn parse_retry_reformat_uses_opposite_backend() {
     assert_eq!(
         codex_model_count.trim(),
         "1",
-        "reformat retry should target codex(gpt-5.3-codex-medium), not bare codex"
+        "reformat retry should target codex(gpt-5.4-medium), not bare codex"
     );
 
     let claude_reformat_counter = counter_dir.join("claude_reformat_count");

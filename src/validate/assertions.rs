@@ -325,7 +325,7 @@ pub fn assert_json_array(value: &Value) -> &Vec<Value> {
 }
 
 /// Normalize a backend string by stripping model suffixes.
-/// For example: `"claude(sonnet-4)"` → `"claude"`, `"codex(gpt-5.3-codex)"` → `"codex"`.
+/// For example: `"claude(sonnet-4)"` → `"claude"`, `"codex(gpt-5.4)"` → `"codex"`.
 /// If the string has no parenthesized suffix, it is returned as-is (lowercased).
 pub fn normalize_backend(backend: &str) -> String {
     let s = backend.trim();

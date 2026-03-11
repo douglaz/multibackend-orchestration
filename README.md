@@ -93,8 +93,8 @@ Examples:
 - `codex`
 - `openrouter`
 - `claude(opus)`
-- `codex(gpt-5.3-codex-xhigh)`
-- `openrouter(openai/gpt-5.3-codex)`
+- `codex(gpt-5.4-xhigh)`
+- `openrouter(openai/gpt-5.4)`
 
 The `openrouter` backend routes model requests through the [OpenRouter](https://openrouter.ai/) API (a model-routing API) and uses [Goose](https://github.com/block/goose) as its CLI runner. It provides access to models from multiple providers (for example OpenAI, Anthropic, and Google) through one backend. This backend is disabled by default (`enabled = false`) and requires an OpenRouter API key.
 
@@ -118,7 +118,7 @@ Examples:
 ./result/bin/ralph config show
 ./result/bin/ralph config get workflow.qa_enabled
 ./result/bin/ralph config set workflow.qa_enabled false
-./result/bin/ralph config set workflow.planner_backend codex(gpt-5.3-codex-high) --project demo
+./result/bin/ralph config set workflow.planner_backend codex(gpt-5.4-high) --project demo
 ```
 
 ## Validate Conformance Tests

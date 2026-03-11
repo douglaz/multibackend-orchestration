@@ -1046,7 +1046,7 @@ mod tests {
             global,
             Some(project),
             RunWorkflowOverrides {
-                planner_backend: Some("codex(gpt-5.3-codex)"),
+                planner_backend: Some("codex(gpt-5.4)"),
                 implementer_backend: Some("claude(opus)"),
                 ..RunWorkflowOverrides::default()
             },
@@ -1055,7 +1055,7 @@ mod tests {
 
         assert_eq!(
             effective.workflow.planner_backend.as_deref(),
-            Some("codex(gpt-5.3-codex)")
+            Some("codex(gpt-5.4)")
         );
         assert_eq!(
             effective.workflow.implementer_backend.as_deref(),
@@ -1097,9 +1097,8 @@ mod tests {
         global.workflow.qa_enabled = false;
         global.workflow.max_qa_iterations = 3;
         global.workflow.prompt_review_enabled = true;
-        global.workflow.prompt_review_backend = "codex(gpt-5.3-codex-xhigh)".to_owned();
-        global.workflow.prompt_review_backends =
-            Some(vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]);
+        global.workflow.prompt_review_backend = "codex(gpt-5.4-xhigh)".to_owned();
+        global.workflow.prompt_review_backends = Some(vec!["codex(gpt-5.4-xhigh)".to_owned()]);
         global.templates.qa = "templates/qa-global.md".to_owned();
         global.templates.prompt_reviewer = "templates/prompt-reviewer-global.md".to_owned();
         global.templates.prompt_review_validator =
@@ -1235,10 +1234,8 @@ mod tests {
     #[test]
     fn validate_prd_config_rejects_invalid_backend_specs() {
         let mut global = GlobalConfig::default();
-        global.workspace.daemon_prd_question_backends = vec![
-            "claude(opus)".to_owned(),
-            "codex(gpt-5.3-codex-high)".to_owned(),
-        ];
+        global.workspace.daemon_prd_question_backends =
+            vec!["claude(opus)".to_owned(), "codex(gpt-5.4-high)".to_owned()];
         global.workspace.daemon_prd_writer_backend = "unknown(model)".to_owned();
 
         let error = validate_interactive_prd_workspace_config(&global)
@@ -1316,10 +1313,8 @@ mod tests {
         global.workspace.daemon_rebase_timeout_seconds = 120;
         global.workspace.daemon_rebase_agent_backend = "claude(opus)".to_owned();
         global.workspace.daemon_prd_enabled = true;
-        global.workspace.daemon_prd_question_backends = vec![
-            "claude(opus)".to_owned(),
-            "codex(gpt-5.3-codex-high)".to_owned(),
-        ];
+        global.workspace.daemon_prd_question_backends =
+            vec!["claude(opus)".to_owned(), "codex(gpt-5.4-high)".to_owned()];
         global.workspace.daemon_prd_writer_backend = "claude".to_owned();
         global.workspace.daemon_prd_reviewer_backend = "codex".to_owned();
         global.workspace.daemon_prd_max_revisions = 3;
@@ -1332,7 +1327,7 @@ mod tests {
                 labels: Some(vec!["l1".to_owned(), "l2".to_owned()]),
                 repo: Some("acme/project".to_owned()),
                 refinement_enabled: Some(false),
-                refinement_backend: Some("codex(gpt-5.3-codex-medium)".to_owned()),
+                refinement_backend: Some("codex(gpt-5.4-medium)".to_owned()),
                 auto_rebase_enabled: Some(false),
                 rebase_interval_seconds: Some(900),
                 max_rebases_per_cycle: Some(5),
@@ -1348,7 +1343,7 @@ mod tests {
         assert_eq!(effective.labels, vec!["l1".to_owned(), "l2".to_owned()]);
         assert_eq!(effective.repo.as_deref(), Some("acme/project"));
         assert!(!effective.refinement_enabled);
-        assert_eq!(effective.refinement_backend, "codex(gpt-5.3-codex-medium)");
+        assert_eq!(effective.refinement_backend, "codex(gpt-5.4-medium)");
         assert!(!effective.auto_rebase_enabled);
         assert_eq!(effective.rebase_interval_seconds, 900);
         assert_eq!(effective.max_rebases_per_cycle, 5);
@@ -1357,10 +1352,7 @@ mod tests {
         assert!(effective.prd_enabled);
         assert_eq!(
             effective.prd_question_backends,
-            vec![
-                "claude(opus)".to_owned(),
-                "codex(gpt-5.3-codex-high)".to_owned()
-            ]
+            vec!["claude(opus)".to_owned(), "codex(gpt-5.4-high)".to_owned()]
         );
         assert_eq!(effective.prd_writer_backend, "claude");
         assert_eq!(effective.prd_reviewer_backend, "codex");
@@ -1383,10 +1375,7 @@ mod tests {
         assert!(no_project.prd_enabled);
         assert_eq!(
             no_project.prd_question_backends,
-            vec![
-                "claude(opus)".to_owned(),
-                "codex(gpt-5.3-codex-high)".to_owned()
-            ]
+            vec!["claude(opus)".to_owned(), "codex(gpt-5.4-high)".to_owned()]
         );
         assert_eq!(no_project.prd_writer_backend, "claude");
         assert_eq!(no_project.prd_reviewer_backend, "codex");
@@ -1881,8 +1870,7 @@ mod tests {
     fn prompt_review_alias_explicit_global_plural_wins_even_when_equal_to_default() {
         let mut global = GlobalConfig::default();
         global.workflow.prompt_review_backend = "claude(opus)".to_owned();
-        global.workflow.prompt_review_backends =
-            Some(vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]);
+        global.workflow.prompt_review_backends = Some(vec!["codex(gpt-5.4-xhigh)".to_owned()]);
 
         let effective = resolve_effective_config(
             Path::new("/workspace"),
@@ -1895,7 +1883,7 @@ mod tests {
 
         assert_eq!(
             effective.workflow.prompt_review_backends,
-            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+            vec!["codex(gpt-5.4-xhigh)".to_owned()]
         );
     }
 
@@ -1904,7 +1892,7 @@ mod tests {
     {
         let mut global = GlobalConfig::default();
         global.workflow.prompt_review_backends = Some(vec![
-            "codex(gpt-5.3-codex-xhigh)".to_owned(),
+            "codex(gpt-5.4-xhigh)".to_owned(),
             "claude(opus)".to_owned(),
         ]);
 
@@ -1938,7 +1926,7 @@ mod tests {
 
         let project = ProjectConfig {
             workflow: ProjectWorkflowOverrides {
-                prompt_review_backend: Some("codex(gpt-5.3-codex-xhigh)".to_owned()),
+                prompt_review_backend: Some("codex(gpt-5.4-xhigh)".to_owned()),
                 prompt_review_backends: Some(vec!["claude".to_owned(), "codex".to_owned()]),
                 ..ProjectWorkflowOverrides::default()
             },

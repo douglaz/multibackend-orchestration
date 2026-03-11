@@ -68,10 +68,7 @@ fn test_backend_opposite() {
     assert_eq!(registry.opposite("claude").unwrap(), "codex");
     assert_eq!(registry.opposite("codex").unwrap(), "claude");
     assert_eq!(registry.opposite("claude(opus)").unwrap(), "codex");
-    assert_eq!(
-        registry.opposite("codex(gpt-5.3-codex-xhigh)").unwrap(),
-        "claude"
-    );
+    assert_eq!(registry.opposite("codex(gpt-5.4-xhigh)").unwrap(), "claude");
 }
 
 #[test]
@@ -148,7 +145,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "planner"),
-        "codex(gpt-5.3-codex-xhigh)"
+        "codex(gpt-5.4-xhigh)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "implementer"),
@@ -156,7 +153,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reviewer"),
-        "codex(gpt-5.3-codex-high)"
+        "codex(gpt-5.4-high)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "final_reviewer"),
@@ -164,7 +161,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "arbiter"),
-        "codex(gpt-5.3-codex-xhigh)"
+        "codex(gpt-5.4-xhigh)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "completer"),
@@ -176,11 +173,11 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reformatter"),
-        "codex(gpt-5.3-codex-medium)"
+        "codex(gpt-5.4-medium)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "qa"),
-        "codex(gpt-5.3-codex-high)"
+        "codex(gpt-5.4-high)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "acceptance_qa"),
@@ -188,7 +185,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "acceptance_qa"),
-        "codex(gpt-5.3-codex-xhigh)"
+        "codex(gpt-5.4-xhigh)"
     );
 }
 
@@ -268,17 +265,17 @@ fn test_assign_feature_backends() {
         .assign_feature_backends(1, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.implementer, "codex(gpt-5.4-high)");
     assert_eq!(backends.reviewer, "claude(opus)");
-    assert_eq!(backends.qa, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.qa, "codex(gpt-5.4-high)");
 
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex, qa=claude (opposite)
     let backends = registry
         .assign_feature_backends(2, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.planner, "codex(gpt-5.4-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.4-high)");
     assert_eq!(backends.qa, "claude(opus)");
 }
 
@@ -298,7 +295,7 @@ fn test_assign_feature_backends_with_qa_override() {
         .assign_feature_backends(1, "claude", &role_overrides)
         .expect("qa override should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.qa, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.qa, "codex(gpt-5.4-high)");
 }
 
 #[test]
@@ -331,15 +328,15 @@ fn test_assign_feature_backends_with_model_spec_start() {
         .assign_feature_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.implementer, "codex(gpt-5.4-high)");
     assert_eq!(backends.reviewer, "claude(opus)");
 
     let backends = registry
         .assign_feature_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.planner, "codex(gpt-5.4-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.4-high)");
 }
 
 #[test]
@@ -382,7 +379,7 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         .expect("mixed feature backends should resolve");
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.4-high)");
 }
 
 #[test]
@@ -417,12 +414,12 @@ fn test_assign_completion_backends() {
         .assign_completion_backends(1, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completers[0], "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completers[0], "codex(gpt-5.4-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.planner, "codex(gpt-5.4-xhigh)");
     assert_eq!(backends.completers[0], "claude(opus)");
 }
 
@@ -453,12 +450,12 @@ fn test_assign_completion_backends_with_model_spec_start() {
         .assign_completion_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completers[0], "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completers[0], "codex(gpt-5.4-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.planner, "codex(gpt-5.4-xhigh)");
     assert_eq!(backends.completers[0], "claude(opus)");
 }
 
@@ -467,7 +464,7 @@ fn test_assign_completion_backends_with_all_role_overrides() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
     let role_overrides = RoleOverrides {
-        planner: Some("codex(gpt-5.3-codex)".to_owned()),
+        planner: Some("codex(gpt-5.4)".to_owned()),
         implementer: None,
         reviewer: None,
         qa: None,
@@ -477,7 +474,7 @@ fn test_assign_completion_backends_with_all_role_overrides() {
     let backends = registry
         .assign_completion_backends(1, "claude", &role_overrides)
         .expect("overridden completion backends should resolve");
-    assert_eq!(backends.planner, "codex(gpt-5.3-codex)");
+    assert_eq!(backends.planner, "codex(gpt-5.4)");
     assert_eq!(backends.completers[0], "claude(opus)");
 }
 
@@ -514,36 +511,21 @@ fn test_backend_alternation_sequence() {
     // Loop 2: Codex planner, Claude implementer, Codex reviewer
     // etc.
     let expected = vec![
-        (
-            1,
-            "claude(opus)",
-            "codex(gpt-5.3-codex-high)",
-            "claude(opus)",
-        ),
+        (1, "claude(opus)", "codex(gpt-5.4-high)", "claude(opus)"),
         (
             2,
-            "codex(gpt-5.3-codex-xhigh)",
+            "codex(gpt-5.4-xhigh)",
             "claude(opus)",
-            "codex(gpt-5.3-codex-high)",
+            "codex(gpt-5.4-high)",
         ),
-        (
-            3,
-            "claude(opus)",
-            "codex(gpt-5.3-codex-high)",
-            "claude(opus)",
-        ),
+        (3, "claude(opus)", "codex(gpt-5.4-high)", "claude(opus)"),
         (
             4,
-            "codex(gpt-5.3-codex-xhigh)",
+            "codex(gpt-5.4-xhigh)",
             "claude(opus)",
-            "codex(gpt-5.3-codex-high)",
+            "codex(gpt-5.4-high)",
         ),
-        (
-            5,
-            "claude(opus)",
-            "codex(gpt-5.3-codex-high)",
-            "claude(opus)",
-        ),
+        (5, "claude(opus)", "codex(gpt-5.4-high)", "claude(opus)"),
     ];
 
     for (loop_num, exp_planner, exp_impl, exp_reviewer) in expected {
@@ -603,10 +585,10 @@ fn test_completion_alternation_sequence() {
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let expected = vec![
-        (1, "claude(opus)", "codex(gpt-5.3-codex-xhigh)"),
-        (2, "codex(gpt-5.3-codex-xhigh)", "claude(opus)"),
-        (3, "claude(opus)", "codex(gpt-5.3-codex-xhigh)"),
-        (4, "codex(gpt-5.3-codex-xhigh)", "claude(opus)"),
+        (1, "claude(opus)", "codex(gpt-5.4-xhigh)"),
+        (2, "codex(gpt-5.4-xhigh)", "claude(opus)"),
+        (3, "claude(opus)", "codex(gpt-5.4-xhigh)"),
+        (4, "codex(gpt-5.4-xhigh)", "claude(opus)"),
     ];
 
     for (loop_num, exp_planner, exp_completer) in expected {
@@ -843,9 +825,9 @@ printf '%s\n' "$*"
 
     let mut registry = BackendRegistry::new(&config, tmux_disabled());
     let backend = registry
-        .get_or_create_for_spec("codex(gpt-5.3-codex-xhigh)")
+        .get_or_create_for_spec("codex(gpt-5.4-xhigh)")
         .expect("codex model backend should be created");
-    assert_eq!(backend.name(), "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backend.name(), "codex(gpt-5.4-xhigh)");
 
     let output = backend
         .execute("hello")
@@ -858,11 +840,11 @@ printf '%s\n' "$*"
         "expected reasoning effort arg, got: {args}"
     );
     assert!(
-        args.contains("--model gpt-5.3-codex"),
+        args.contains("--model gpt-5.4"),
         "expected base model arg, got: {args}"
     );
     assert!(
-        !args.contains("--model gpt-5.3-codex-xhigh"),
+        !args.contains("--model gpt-5.4-xhigh"),
         "unexpected suffixed model arg: {args}"
     );
 }

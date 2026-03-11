@@ -239,7 +239,7 @@ fn malformed_stage_output(label: &str) -> String {
 fn base_options(idea: &str, ask_max: u32) -> PrdOptions {
     PrdOptions {
         idea: idea.to_string(),
-        backend_spec: "codex(gpt-5.3-codex)".to_string(),
+        backend_spec: "codex(gpt-5.4)".to_string(),
         ask_max,
         resume: false,
         dry_run: false,

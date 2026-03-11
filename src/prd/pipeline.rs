@@ -26,7 +26,7 @@ const MAX_SECTION_RETRIES: u8 = 2;
 pub struct PrdOptions {
     /// The product idea to generate a PRD for.
     pub idea: String,
-    /// The backend specification (e.g., "codex(gpt-5.3-codex)").
+    /// The backend specification (e.g., "codex(gpt-5.4)").
     pub backend_spec: String,
     /// Maximum number of question rounds.
     pub ask_max: u32,
