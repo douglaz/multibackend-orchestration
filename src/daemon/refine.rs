@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn create_backend_accepts_codex() {
         let config = GlobalConfig::default();
-        let result = create_backend("codex(gpt-5.3-codex-medium)", &config);
+        let result = create_backend("codex(gpt-5.4-medium)", &config);
         assert!(result.is_ok());
     }
 

@@ -584,9 +584,9 @@ fn test_qa_fields_serde_round_trip() {
         status: LoopStatus::InProgress,
         backends: FeatureLoopBackends {
             planner: "claude(opus)".to_owned(),
-            implementer: "codex(gpt-5.3-codex-high)".to_owned(),
+            implementer: "codex(gpt-5.4-high)".to_owned(),
             reviewer: "claude(opus)".to_owned(),
-            qa: "codex(gpt-5.3-codex-high)".to_owned(),
+            qa: "codex(gpt-5.4-high)".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "loops/001-demo/spec.md".to_owned(),
@@ -615,7 +615,7 @@ fn test_qa_fields_serde_round_trip() {
         status: LoopStatus::InProgress,
         backends: CompletionLoopBackends::new(
             "claude(opus)".to_owned(),
-            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()],
+            vec!["codex(gpt-5.4-xhigh)".to_owned()],
         ),
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/002-completion/termination-request.md".to_owned(),
@@ -636,7 +636,7 @@ fn test_qa_fields_serde_round_trip() {
     let json = serde_json::to_string(&state).expect("serialize state");
     let loaded: ProjectState = serde_json::from_str(&json).expect("deserialize state");
     assert_eq!(loaded.current_phase, Phase::QA);
-    assert_eq!(loaded.loops[0].backends.qa, "codex(gpt-5.3-codex-high)");
+    assert_eq!(loaded.loops[0].backends.qa, "codex(gpt-5.4-high)");
     assert_eq!(loaded.loops[0].artifacts.qa_results.len(), 1);
     assert_eq!(
         loaded.loops[0].artifacts.pending_qa_feedback.as_deref(),

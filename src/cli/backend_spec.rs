@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn validate_codex_with_model() {
         let config = GlobalConfig::default();
-        validate_backend_spec("codex(gpt-5.3-codex-xhigh)", &config)
+        validate_backend_spec("codex(gpt-5.4-xhigh)", &config)
             .expect("codex with model should be valid");
     }
 
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn validate_name_only_accepts_optional_openrouter_with_model() {
-        validate_backend_spec_name("?openrouter(gpt-5.3-codex-xhigh)")
+        validate_backend_spec_name("?openrouter(gpt-5.4-xhigh)")
             .expect("optional openrouter with model should be valid");
     }
 }

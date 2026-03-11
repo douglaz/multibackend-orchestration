@@ -226,8 +226,7 @@ mod tests {
 
     #[test]
     fn project_backend_accepts_codex_with_model() {
-        validate_backend_spec_name("codex(gpt-5.3-codex-xhigh)")
-            .expect("codex with model should pass");
+        validate_backend_spec_name("codex(gpt-5.4-xhigh)").expect("codex with model should pass");
     }
 
     #[test]

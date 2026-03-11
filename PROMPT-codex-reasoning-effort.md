@@ -2,13 +2,13 @@
 
 ## Overview
 
-The codex CLI `model_reasoning_effort` config controls how much reasoning the model applies. Ralph's per-role model config already encodes effort in the model name suffix (e.g., `gpt-5.3-codex-xhigh`, `gpt-5.3-codex-high`, `gpt-5.3-codex-medium`). However, ChatGPT accounts don't support these suffixed model names — only the base `gpt-5.3-codex` works. The effort must be passed separately via `-c model_reasoning_effort="xhigh"`.
+The codex CLI `model_reasoning_effort` config controls how much reasoning the model applies. Ralph's per-role model config already encodes effort in the model name suffix (e.g., `gpt-5.4-xhigh`, `gpt-5.4-high`, `gpt-5.4-medium`). However, ChatGPT accounts don't support these suffixed model names — only the base `gpt-5.4` works. The effort must be passed separately via `-c model_reasoning_effort="xhigh"`.
 
-This feature makes ralph **decompose** suffixed codex model names at invocation time: strip the known effort suffix from the model name and pass it as a separate `-c model_reasoning_effort="..."` CLI arg. This way the existing config (`models.planner = "gpt-5.3-codex-xhigh"`) keeps working unchanged — ralph just interprets the suffix intelligently.
+This feature makes ralph **decompose** suffixed codex model names at invocation time: strip the known effort suffix from the model name and pass it as a separate `-c model_reasoning_effort="..."` CLI arg. This way the existing config (`models.planner = "gpt-5.4-xhigh"`) keeps working unchanged — ralph just interprets the suffix intelligently.
 
 ## Background
 
-The codex CLI accepts: `codex exec -c model_reasoning_effort="xhigh" --model gpt-5.3-codex ...`
+The codex CLI accepts: `codex exec -c model_reasoning_effort="xhigh" --model gpt-5.4 ...`
 
 Known effort suffixes: `-low`, `-medium`, `-high`, `-xhigh`. These are appended to a base codex model name.
 
@@ -77,8 +77,8 @@ pub fn backend_from_config(config: &GlobalConfig, model: Option<&str>) -> CliBac
 ```
 
 Key points:
-- The **display name** keeps the original suffixed model (e.g., `codex(gpt-5.3-codex-xhigh)`) so state.json and logs show exactly what was configured.
-- The **CLI args** use the base model name (`--model gpt-5.3-codex`) plus the extracted effort (`-c model_reasoning_effort="xhigh"`).
+- The **display name** keeps the original suffixed model (e.g., `codex(gpt-5.4-xhigh)`) so state.json and logs show exactly what was configured.
+- The **CLI args** use the base model name (`--model gpt-5.4`) plus the extracted effort (`-c model_reasoning_effort="xhigh"`).
 - If the model has no known suffix, no `-c model_reasoning_effort` arg is injected (the codex CLI will use its own config default).
 - The `claude.rs` `backend_from_config()` is NOT modified — suffix decomposition is codex-specific.
 
@@ -87,7 +87,7 @@ Key points:
 - **No new config structs** — no `BackendRoleReasoningEfforts`. The existing `BackendRoleModels` with suffixed model names is the configuration mechanism.
 - **No changes to `BackendConfig`** — the models config stays as-is.
 - **No changes to `BackendRegistry`**, `resolve_backend_for_role()`, `get_or_create_for_spec()`, or the orchestrator — all the decomposition happens inside `codex::backend_from_config()`.
-- **No changes to default model names** — `gpt-5.3-codex-xhigh`, `gpt-5.3-codex-high`, `gpt-5.3-codex-medium` stay as defaults.
+- **No changes to default model names** — `gpt-5.4-xhigh`, `gpt-5.4-high`, `gpt-5.4-medium` stay as defaults.
 - **No changes to `parse_backend_spec()`** — the spec format is unchanged.
 - **No changes to `ralph.toml` live config** — user file, not touched.
 
@@ -105,59 +105,59 @@ Key points:
 
 #[test]
 fn parse_codex_model_effort_strips_xhigh() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-xhigh");
-    assert_eq!(base, "gpt-5.3-codex");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4-xhigh");
+    assert_eq!(base, "gpt-5.4");
     assert_eq!(effort, Some("xhigh"));
 }
 
 #[test]
 fn parse_codex_model_effort_strips_high() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-high");
-    assert_eq!(base, "gpt-5.3-codex");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4-high");
+    assert_eq!(base, "gpt-5.4");
     assert_eq!(effort, Some("high"));
 }
 
 #[test]
 fn parse_codex_model_effort_strips_medium() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-medium");
-    assert_eq!(base, "gpt-5.3-codex");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4-medium");
+    assert_eq!(base, "gpt-5.4");
     assert_eq!(effort, Some("medium"));
 }
 
 #[test]
 fn parse_codex_model_effort_strips_low() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-low");
-    assert_eq!(base, "gpt-5.3-codex");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4-low");
+    assert_eq!(base, "gpt-5.4");
     assert_eq!(effort, Some("low"));
 }
 
 #[test]
 fn parse_codex_model_effort_no_suffix() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex");
-    assert_eq!(base, "gpt-5.3-codex");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4");
+    assert_eq!(base, "gpt-5.4");
     assert_eq!(effort, None);
 }
 
 #[test]
 fn parse_codex_model_effort_unknown_suffix() {
-    let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-turbo");
-    assert_eq!(base, "gpt-5.3-codex-turbo");
+    let (base, effort) = parse_codex_model_effort("gpt-5.4-turbo");
+    assert_eq!(base, "gpt-5.4-turbo");
     assert_eq!(effort, None);
 }
 ```
 
-Integration test in `tests/backend.rs`: Create a codex backend with a suffixed model via `get_or_create_for_spec("codex(gpt-5.3-codex-xhigh)")`, execute it against a mock script that prints its args, and verify the output contains `--model gpt-5.3-codex` and `-c model_reasoning_effort="xhigh"` (not `--model gpt-5.3-codex-xhigh`).
+Integration test in `tests/backend.rs`: Create a codex backend with a suffixed model via `get_or_create_for_spec("codex(gpt-5.4-xhigh)")`, execute it against a mock script that prints its args, and verify the output contains `--model gpt-5.4` and `-c model_reasoning_effort="xhigh"` (not `--model gpt-5.4-xhigh`).
 
 ## Verification
 
-`nix build` passes. A codex backend configured with model `gpt-5.3-codex-xhigh` should produce:
+`nix build` passes. A codex backend configured with model `gpt-5.4-xhigh` should produce:
 ```
-codex -c model_reasoning_effort="xhigh" --model gpt-5.3-codex exec --dangerously-bypass-approvals-and-sandbox -
+codex -c model_reasoning_effort="xhigh" --model gpt-5.4 exec --dangerously-bypass-approvals-and-sandbox -
 ```
 
-A codex backend with model `gpt-5.3-codex` (no suffix) should produce:
+A codex backend with model `gpt-5.4` (no suffix) should produce:
 ```
-codex --model gpt-5.3-codex exec --dangerously-bypass-approvals-and-sandbox -
+codex --model gpt-5.4 exec --dangerously-bypass-approvals-and-sandbox -
 ```
 
 ## Scope Boundaries

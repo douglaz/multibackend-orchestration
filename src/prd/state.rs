@@ -176,7 +176,7 @@ mod tests {
         let meta = PrdMeta {
             idea: "test idea".to_string(),
             idea_hash: "abc123".to_string(),
-            backend: "codex(gpt-5.3-codex)".to_string(),
+            backend: "codex(gpt-5.4)".to_string(),
             started_at: "2026-02-10T20:00:00Z".to_string(),
             completed_at: Some("2026-02-10T20:10:00Z".to_string()),
             stage_timings,

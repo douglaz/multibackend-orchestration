@@ -1569,14 +1569,14 @@ mod tests {
 
     #[test]
     fn parse_backend_spec_accepts_optional_name_with_model() {
-        let parsed = parse_backend_spec("?openrouter(gpt-5.3-codex-xhigh)")
-            .expect("optional modeled backend");
+        let parsed =
+            parse_backend_spec("?openrouter(gpt-5.4-xhigh)").expect("optional modeled backend");
         assert_eq!(
             parsed,
             BackendSpec {
                 optional: true,
                 name: "openrouter".to_owned(),
-                model: Some("gpt-5.3-codex-xhigh".to_owned()),
+                model: Some("gpt-5.4-xhigh".to_owned()),
             }
         );
     }
@@ -1656,9 +1656,9 @@ mod tests {
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         let backend = registry
-            .get_or_create_for_spec("openrouter(gpt-5.3-codex-xhigh)")
+            .get_or_create_for_spec("openrouter(gpt-5.4-xhigh)")
             .expect("openrouter backend should be creatable from registry");
-        assert_eq!(backend.name(), "openrouter(gpt-5.3-codex-xhigh)");
+        assert_eq!(backend.name(), "openrouter(gpt-5.4-xhigh)");
     }
 
     #[test]
@@ -2088,7 +2088,7 @@ sleep 30
                 "exec".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                 "--model".to_owned(),
-                "gpt-5.3".to_owned(),
+                "gpt-5.4".to_owned(),
                 "-".to_owned(),
             ],
             Duration::from_secs(10),
@@ -2124,7 +2124,7 @@ sleep 30
         // Original flags preserved
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()));
         assert!(args.contains(&"--model".to_owned()));
-        assert!(args.contains(&"gpt-5.3".to_owned()));
+        assert!(args.contains(&"gpt-5.4".to_owned()));
     }
 
     #[test]
@@ -2423,7 +2423,7 @@ done
         config.backends.openrouter.enabled = BackendEnabled::Disabled;
         let registry = BackendRegistry::new(&config, tmux_disabled());
         assert!(!registry.is_backend_available("openrouter"));
-        assert!(!registry.is_backend_available("openrouter(gpt-5.3-codex-xhigh)"));
+        assert!(!registry.is_backend_available("openrouter(gpt-5.4-xhigh)"));
     }
 
     #[test]

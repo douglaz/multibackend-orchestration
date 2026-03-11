@@ -785,15 +785,15 @@ fn default_codex_backend_config() -> BackendConfig {
         enabled: BackendEnabled::Auto,
         env: BTreeMap::new(),
         models: BackendRoleModels {
-            planner: Some("gpt-5.3-codex-xhigh".to_owned()),
-            implementer: Some("gpt-5.3-codex-high".to_owned()),
-            reviewer: Some("gpt-5.3-codex-high".to_owned()),
-            final_reviewer: Some("gpt-5.3-codex-high".to_owned()),
-            arbiter: Some("gpt-5.3-codex-xhigh".to_owned()),
-            qa: Some("gpt-5.3-codex-high".to_owned()),
-            completer: Some("gpt-5.3-codex-xhigh".to_owned()),
-            acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
-            reformatter: Some("gpt-5.3-codex-medium".to_owned()),
+            planner: Some("gpt-5.4-xhigh".to_owned()),
+            implementer: Some("gpt-5.4-high".to_owned()),
+            reviewer: Some("gpt-5.4-high".to_owned()),
+            final_reviewer: Some("gpt-5.4-high".to_owned()),
+            arbiter: Some("gpt-5.4-xhigh".to_owned()),
+            qa: Some("gpt-5.4-high".to_owned()),
+            completer: Some("gpt-5.4-xhigh".to_owned()),
+            acceptance_qa: Some("gpt-5.4-xhigh".to_owned()),
+            reformatter: Some("gpt-5.4-medium".to_owned()),
         },
         role_timeouts: RoleTimeouts::default(),
     }
@@ -1043,7 +1043,7 @@ fn default_prompt_review_enabled() -> bool {
 }
 
 fn default_prompt_review_backend() -> String {
-    "codex(gpt-5.3-codex-xhigh)".to_owned()
+    "codex(gpt-5.4-xhigh)".to_owned()
 }
 
 fn default_prompt_review_min_reviewers() -> u32 {
@@ -2061,12 +2061,12 @@ command = "claude-custom"
         assert!(config.workflow.prompt_review_enabled);
         assert_eq!(
             config.workflow.prompt_review_backend,
-            "codex(gpt-5.3-codex-xhigh)"
+            "codex(gpt-5.4-xhigh)"
         );
         assert!(config.workflow.prompt_review_backends.is_none());
         assert_eq!(
             config.workflow.prompt_review_backends_or_default(),
-            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+            vec!["codex(gpt-5.4-xhigh)".to_owned()]
         );
         assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
         assert_eq!(
@@ -2076,8 +2076,8 @@ command = "claude-custom"
         );
         assert_eq!(
             config.backends.codex.models.qa.as_deref(),
-            Some("gpt-5.3-codex-high"),
-            "codex qa model should default to gpt-5.3-codex-high"
+            Some("gpt-5.4-high"),
+            "codex qa model should default to gpt-5.4-high"
         );
         assert_eq!(config.templates.qa, "templates/qa.md");
         assert_eq!(
@@ -2308,12 +2308,12 @@ base_branch = "master"
         assert!(config.workflow.prompt_review_enabled);
         assert_eq!(
             config.workflow.prompt_review_backend,
-            "codex(gpt-5.3-codex-xhigh)"
+            "codex(gpt-5.4-xhigh)"
         );
         assert!(config.workflow.prompt_review_backends.is_none());
         assert_eq!(
             config.workflow.prompt_review_backends_or_default(),
-            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+            vec!["codex(gpt-5.4-xhigh)".to_owned()]
         );
         assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
         assert_eq!(config.templates.qa, "templates/qa.md");
@@ -2377,16 +2377,16 @@ daemon_max_concurrent = 2
 daemon_labels = ["ralph:ready", "triage"]
 daemon_repo = "acme/widgets"
 daemon_refinement_enabled = false
-daemon_refinement_backend = "codex(gpt-5.3-codex-medium)"
+daemon_refinement_backend = "codex(gpt-5.4-medium)"
 daemon_auto_rebase_enabled = false
 daemon_rebase_interval_seconds = 900
 daemon_max_rebases_per_cycle = 5
 daemon_rebase_timeout_seconds = 240
 daemon_rebase_agent_backend = "none"
 daemon_prd_enabled = false
-daemon_prd_question_backends = ["claude(opus)", "codex(gpt-5.3-codex-high)"]
+daemon_prd_question_backends = ["claude(opus)", "codex(gpt-5.4-high)"]
 daemon_prd_writer_backend = "claude(sonnet)"
-daemon_prd_reviewer_backend = "codex(gpt-5.3-codex-medium)"
+daemon_prd_reviewer_backend = "codex(gpt-5.4-medium)"
 daemon_prd_max_revisions = 7
 daemon_prd_backend_timeout_secs = 300
 
@@ -2437,7 +2437,7 @@ base_branch = "master"
         assert!(!config.workspace.daemon_refinement_enabled);
         assert_eq!(
             config.workspace.daemon_refinement_backend,
-            "codex(gpt-5.3-codex-medium)"
+            "codex(gpt-5.4-medium)"
         );
         assert!(!config.workspace.daemon_auto_rebase_enabled);
         assert_eq!(config.workspace.daemon_rebase_interval_seconds, 900);
@@ -2447,15 +2447,12 @@ base_branch = "master"
         assert!(!config.workspace.daemon_prd_enabled);
         assert_eq!(
             config.workspace.daemon_prd_question_backends,
-            vec![
-                "claude(opus)".to_owned(),
-                "codex(gpt-5.3-codex-high)".to_owned()
-            ]
+            vec!["claude(opus)".to_owned(), "codex(gpt-5.4-high)".to_owned()]
         );
         assert_eq!(config.workspace.daemon_prd_writer_backend, "claude(sonnet)");
         assert_eq!(
             config.workspace.daemon_prd_reviewer_backend,
-            "codex(gpt-5.3-codex-medium)"
+            "codex(gpt-5.4-medium)"
         );
         assert_eq!(config.workspace.daemon_prd_max_revisions, 7);
         assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 300);
@@ -2547,15 +2544,15 @@ command = "codex"
 timeout_seconds = 7200
 
 [backends.codex.models]
-planner = "gpt-5.3-codex-xhigh"
-implementer = "gpt-5.3-codex-high"
-reviewer = "gpt-5.3-codex-high"
-final_reviewer = "gpt-5.3-codex-high"
-arbiter = "gpt-5.3-codex-xhigh"
-qa = "gpt-5.3-codex-high"
-completer = "gpt-5.3-codex-xhigh"
-acceptance_qa = "gpt-5.3-codex-xhigh"
-reformatter = "gpt-5.3-codex-medium"
+planner = "gpt-5.4-xhigh"
+implementer = "gpt-5.4-high"
+reviewer = "gpt-5.4-high"
+final_reviewer = "gpt-5.4-high"
+arbiter = "gpt-5.4-xhigh"
+qa = "gpt-5.4-high"
+completer = "gpt-5.4-xhigh"
+acceptance_qa = "gpt-5.4-xhigh"
+reformatter = "gpt-5.4-medium"
 
 [workflow]
 max_review_iterations = 5
@@ -2613,39 +2610,39 @@ base_branch = "master"
         );
         assert_eq!(
             config.backends.codex.models.planner.as_deref(),
-            Some("gpt-5.3-codex-xhigh")
+            Some("gpt-5.4-xhigh")
         );
         assert_eq!(
             config.backends.codex.models.implementer.as_deref(),
-            Some("gpt-5.3-codex-high")
+            Some("gpt-5.4-high")
         );
         assert_eq!(
             config.backends.codex.models.reviewer.as_deref(),
-            Some("gpt-5.3-codex-high")
+            Some("gpt-5.4-high")
         );
         assert_eq!(
             config.backends.codex.models.final_reviewer.as_deref(),
-            Some("gpt-5.3-codex-high")
+            Some("gpt-5.4-high")
         );
         assert_eq!(
             config.backends.codex.models.arbiter.as_deref(),
-            Some("gpt-5.3-codex-xhigh")
+            Some("gpt-5.4-xhigh")
         );
         assert_eq!(
             config.backends.codex.models.qa.as_deref(),
-            Some("gpt-5.3-codex-high")
+            Some("gpt-5.4-high")
         );
         assert_eq!(
             config.backends.codex.models.completer.as_deref(),
-            Some("gpt-5.3-codex-xhigh")
+            Some("gpt-5.4-xhigh")
         );
         assert_eq!(
             config.backends.codex.models.acceptance_qa.as_deref(),
-            Some("gpt-5.3-codex-xhigh")
+            Some("gpt-5.4-xhigh")
         );
         assert_eq!(
             config.backends.codex.models.reformatter.as_deref(),
-            Some("gpt-5.3-codex-medium")
+            Some("gpt-5.4-medium")
         );
     }
 

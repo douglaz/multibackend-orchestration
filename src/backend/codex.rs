@@ -70,43 +70,43 @@ mod tests {
 
     #[test]
     fn parse_codex_model_effort_strips_xhigh() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-xhigh");
-        assert_eq!(base, "gpt-5.3-codex");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4-xhigh");
+        assert_eq!(base, "gpt-5.4");
         assert_eq!(effort, Some("xhigh"));
     }
 
     #[test]
     fn parse_codex_model_effort_strips_high() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-high");
-        assert_eq!(base, "gpt-5.3-codex");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4-high");
+        assert_eq!(base, "gpt-5.4");
         assert_eq!(effort, Some("high"));
     }
 
     #[test]
     fn parse_codex_model_effort_strips_medium() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-medium");
-        assert_eq!(base, "gpt-5.3-codex");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4-medium");
+        assert_eq!(base, "gpt-5.4");
         assert_eq!(effort, Some("medium"));
     }
 
     #[test]
     fn parse_codex_model_effort_strips_low() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-low");
-        assert_eq!(base, "gpt-5.3-codex");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4-low");
+        assert_eq!(base, "gpt-5.4");
         assert_eq!(effort, Some("low"));
     }
 
     #[test]
     fn parse_codex_model_effort_no_suffix() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex");
-        assert_eq!(base, "gpt-5.3-codex");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4");
+        assert_eq!(base, "gpt-5.4");
         assert_eq!(effort, None);
     }
 
     #[test]
     fn parse_codex_model_effort_unknown_suffix() {
-        let (base, effort) = parse_codex_model_effort("gpt-5.3-codex-turbo");
-        assert_eq!(base, "gpt-5.3-codex-turbo");
+        let (base, effort) = parse_codex_model_effort("gpt-5.4-turbo");
+        assert_eq!(base, "gpt-5.4-turbo");
         assert_eq!(effort, None);
     }
 }

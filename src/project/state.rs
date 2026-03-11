@@ -744,7 +744,7 @@ mod tests {
         let mut store = SessionStore::default();
         store.upsert(SessionRecord {
             session_id: "sid-rt".to_owned(),
-            backend_spec: "codex(gpt-5.3-codex-high)".to_owned(),
+            backend_spec: "codex(gpt-5.4-high)".to_owned(),
             role: "reviewer".to_owned(),
             loop_number: 3,
             bootstrap_hash: "abcd1234".to_owned(),

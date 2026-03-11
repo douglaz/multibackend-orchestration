@@ -632,7 +632,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "config",
             "set",
             "daemon.refinement_backend",
-            "codex(gpt-5.3-codex-medium)",
+            "codex(gpt-5.4-medium)",
             "--project",
             "daemon-config",
         ])
@@ -685,10 +685,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
         let refinement_backend_project = dh
             .ralph_ok(["config", "get", "daemon.refinement_backend"])
             .expect("config get daemon.refinement_backend should succeed");
-        assert_eq!(
-            refinement_backend_project.trim(),
-            "codex(gpt-5.3-codex-medium)"
-        );
+        assert_eq!(refinement_backend_project.trim(), "codex(gpt-5.4-medium)");
 
         let auto_rebase_enabled_project = dh
             .ralph_ok(["config", "get", "daemon.auto_rebase_enabled"])

@@ -534,7 +534,7 @@ fn global_plural_explicit_default_wins_over_singular(h: &RalphHarness) -> TestRe
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"codex(gpt-5.3-codex-xhigh)\"]",
+            "[\"codex(gpt-5.4-xhigh)\"]",
             "--global",
         ])
         .expect("set global plural explicitly to default value");
@@ -549,7 +549,7 @@ fn global_plural_explicit_default_wins_over_singular(h: &RalphHarness) -> TestRe
         assert_json_field(
             &parsed,
             "workflow.prompt_review_backends",
-            &json!(["codex(gpt-5.3-codex-xhigh)"]),
+            &json!(["codex(gpt-5.4-xhigh)"]),
         );
     })
 }
@@ -569,7 +569,7 @@ fn project_singular_override_wins_over_global_plural(h: &RalphHarness) -> TestRe
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"codex(gpt-5.3-codex-xhigh)\",\"claude(opus)\"]",
+            "[\"codex(gpt-5.4-xhigh)\",\"claude(opus)\"]",
             "--global",
         ])
         .expect("set global plural");
@@ -633,7 +633,7 @@ fn singular_alias_rejects_optional_project_openrouter(h: &RalphHarness) -> TestR
                 "config",
                 "set",
                 "workflow.prompt_review_backend",
-                "?openrouter(gpt-5.3-codex-xhigh)",
+                "?openrouter(gpt-5.4-xhigh)",
                 "--project",
                 project_id,
             ])

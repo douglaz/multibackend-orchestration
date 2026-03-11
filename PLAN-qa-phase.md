@@ -157,7 +157,7 @@ Defaults:
 1. `qa_enabled = false`
 2. `max_qa_iterations = 3`
 3. Claude `models.qa = Some("opus")`
-4. Codex `models.qa = Some("gpt-5.3-codex-high")`
+4. Codex `models.qa = Some("gpt-5.4-high")`
 
 ### `src/config/project.rs`
 Add overrides:

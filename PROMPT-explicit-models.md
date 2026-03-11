@@ -2,13 +2,13 @@
 
 ## Goal
 
-Allow users to specify which model each backend should use, using the syntax `backend(model)` — e.g. `claude(opus)`, `codex(gpt-5.3-codex-xhigh)`. This applies everywhere a backend name is accepted: `default_backend`, `starting_backend`, and `--backend` CLI flag.
+Allow users to specify which model each backend should use, using the syntax `backend(model)` — e.g. `claude(opus)`, `codex(gpt-5.4-xhigh)`. This applies everywhere a backend name is accepted: `default_backend`, `starting_backend`, and `--backend` CLI flag.
 
 ## Current State
 
 Backend names are bare strings like `"claude"` or `"codex"`. The backend config in `ralph.toml` defines the command and args but has no model concept. The CLI backends both accept a `--model <MODEL>` flag:
 - `claude --model opus` or `claude --model claude-opus-4-6`
-- `codex exec --model gpt-5.3-codex-xhigh ...`
+- `codex exec --model gpt-5.4-xhigh ...`
 
 ## Design
 
@@ -17,7 +17,7 @@ Backend names are bare strings like `"claude"` or `"codex"`. The backend config 
 When a backend reference includes parentheses, parse it as `name(model)`:
 - `claude` → backend="claude", model=None (use whatever default the CLI uses)
 - `claude(opus)` → backend="claude", model=Some("opus")
-- `codex(gpt-5.3-codex-xhigh)` → backend="codex", model=Some("gpt-5.3-codex-xhigh")
+- `codex(gpt-5.4-xhigh)` → backend="codex", model=Some("gpt-5.4-xhigh")
 
 ### Where model specs appear
 

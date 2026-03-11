@@ -6557,9 +6557,9 @@ mod tests {
 
         assert!(registry.get("claude(opus)").is_some());
         assert!(registry.get("claude(sonnet)").is_some());
-        assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
-        assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
-        assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
+        assert!(registry.get("codex(gpt-5.4-xhigh)").is_some());
+        assert!(registry.get("codex(gpt-5.4-high)").is_some());
+        assert!(registry.get("codex(gpt-5.4-medium)").is_some());
     }
 
     #[test]
@@ -6574,8 +6574,8 @@ mod tests {
             .expect("preloading without role-models should succeed");
 
         assert!(registry.get("claude(opus)").is_none());
-        assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
-        assert!(registry.get("openrouter(gpt-5.3-codex-xhigh)").is_none());
+        assert!(registry.get("codex(gpt-5.4-xhigh)").is_none());
+        assert!(registry.get("openrouter(gpt-5.4-xhigh)").is_none());
     }
 
     #[test]
@@ -8143,7 +8143,7 @@ mod tests {
         );
         let changed = super::compute_bootstrap_hash(
             "implementer",
-            "codex(gpt-5.3)",
+            "codex(gpt-5.4)",
             "phash",
             "spec",
             "template",

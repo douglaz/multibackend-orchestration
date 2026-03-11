@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn ensure_backend_accepts_codex_with_model() {
-        ensure_backend("codex(gpt-5.3-codex-xhigh)").expect("codex with model should pass");
+        ensure_backend("codex(gpt-5.4-xhigh)").expect("codex with model should pass");
     }
 
     #[test]
@@ -937,9 +937,9 @@ mod tests {
 
     #[test]
     fn parse_optional_backend_accepts_optional_openrouter() {
-        let result = parse_optional_backend("?openrouter(gpt-5.3-codex-xhigh)")
+        let result = parse_optional_backend("?openrouter(gpt-5.4-xhigh)")
             .expect("optional openrouter should parse successfully");
-        assert_eq!(result, Some("?openrouter(gpt-5.3-codex-xhigh)".to_owned()));
+        assert_eq!(result, Some("?openrouter(gpt-5.4-xhigh)".to_owned()));
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         let err = set_global_value(
             &mut config,
             "workflow.prompt_review_backend",
-            "?openrouter(gpt-5.3-codex-xhigh)",
+            "?openrouter(gpt-5.4-xhigh)",
         )
         .expect_err("optional syntax should be rejected for singular alias");
         assert!(err.to_string().contains(

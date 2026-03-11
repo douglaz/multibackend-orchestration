@@ -9,7 +9,7 @@ Ralph implements a multi-backend AI orchestration pattern where different AI sys
 Key capabilities:
 - **Plan/Implement/Review/Commit loops** with automatic backend alternation
 - **Per-role model selection** — different models for different roles (e.g., opus for planning, sonnet for reformatting)
-- **Codex reasoning effort decomposition** — suffixed model names (e.g., `gpt-5.3-codex-xhigh`) are automatically split into base model + effort CLI flag
+- **Codex reasoning effort decomposition** — suffixed model names (e.g., `gpt-5.4-xhigh`) are automatically split into base model + effort CLI flag
 - **Parse retry with reformatter agent** — failed output parsing triggers a reformatter (opposite backend) before full retry
 - **Auto-rollback** on review iteration limit exceeded
 - **Tmux execution mode** — visual backend execution in tmux windows with labeled panes
@@ -105,7 +105,7 @@ Backend references use the format `"backend"` or `"backend(model)"`:
 claude              # Claude with default model
 claude(opus)        # Claude with explicit model
 codex               # Codex with default model
-codex(gpt-5.3-codex-xhigh)  # Codex with suffixed model
+codex(gpt-5.4-xhigh)  # Codex with suffixed model
 ```
 
 The `parse_backend_spec()` function in `src/backend/mod.rs` parses these into `BackendSpec { name, model }`.
@@ -115,9 +115,9 @@ The `parse_backend_spec()` function in `src/backend/mod.rs` parses these into `B
 Codex model names with known effort suffixes (`-xhigh`, `-high`, `-medium`, `-low`) are automatically decomposed at invocation time:
 
 ```
-Config model: gpt-5.3-codex-xhigh
-CLI args:     codex -c model_reasoning_effort="xhigh" --model gpt-5.3-codex exec ...
-Display name: codex(gpt-5.3-codex-xhigh)  (preserved for state.json/logs)
+Config model: gpt-5.4-xhigh
+CLI args:     codex -c model_reasoning_effort="xhigh" --model gpt-5.4 exec ...
+Display name: codex(gpt-5.4-xhigh)  (preserved for state.json/logs)
 ```
 
 Suffix matching is longest-first (`-xhigh` before `-high`). Unknown suffixes pass through unchanged. This is codex-specific — Claude model names are not decomposed.
@@ -143,12 +143,12 @@ Code defaults (in `GlobalConfig::default()`):
 
 | Role | Claude | Codex |
 |------|--------|-------|
-| planner | opus | gpt-5.3-codex-xhigh |
-| implementer | opus | gpt-5.3-codex-high |
-| reviewer | opus | gpt-5.3-codex-xhigh |
-| qa | opus | gpt-5.3-codex-high |
-| completer | opus | gpt-5.3-codex-xhigh |
-| reformatter | sonnet | gpt-5.3-codex-medium |
+| planner | opus | gpt-5.4-xhigh |
+| implementer | opus | gpt-5.4-high |
+| reviewer | opus | gpt-5.4-xhigh |
+| qa | opus | gpt-5.4-high |
+| completer | opus | gpt-5.4-xhigh |
+| reformatter | sonnet | gpt-5.4-medium |
 
 When `GlobalConfig::load()` reads `ralph.toml`, any omitted model fields are filled from code defaults via `BackendRoleModels::fill_from()`. This means `ralph.toml` only needs to specify model overrides — omitted fields get the code defaults automatically.
 
@@ -276,7 +276,7 @@ When a backend response cannot be parsed (missing H1, wrong format):
 3. **Attempt 3 (reminded original)**: If reformatter output also fails, retry with the **original backend** using the original prompt augmented with a format reminder preamble
 4. If still failing, fail with `ParseRetriesExhausted`
 
-The reformatter role uses a lighter model (e.g., `sonnet` for Claude, `gpt-5.3-codex-medium` for Codex) since it only needs to reformat, not generate.
+The reformatter role uses a lighter model (e.g., `sonnet` for Claude, `gpt-5.4-medium` for Codex) since it only needs to reformat, not generate.
 
 ### Auto-Rollback on Review Iteration Limit
 
@@ -355,7 +355,7 @@ The orchestrator injects YAML frontmatter; backend responses provide body conten
 artifact: impl-notes
 loop: 3
 project: my-project
-backend: codex(gpt-5.3-codex-high)
+backend: codex(gpt-5.4-high)
 role: implementer
 created_at: 2026-02-05T14:30:00Z
 ---
@@ -451,12 +451,12 @@ timeout_seconds = 600
 env = {}
 
 [backends.codex.models]         # Optional — code defaults apply for omitted fields
-planner = "gpt-5.3-codex-xhigh"
-implementer = "gpt-5.3-codex-high"
-reviewer = "gpt-5.3-codex-xhigh"
-qa = "gpt-5.3-codex-high"
-completer = "gpt-5.3-codex-xhigh"
-reformatter = "gpt-5.3-codex-medium"
+planner = "gpt-5.4-xhigh"
+implementer = "gpt-5.4-high"
+reviewer = "gpt-5.4-xhigh"
+qa = "gpt-5.4-high"
+completer = "gpt-5.4-xhigh"
+reformatter = "gpt-5.4-medium"
 
 [workflow]
 max_review_iterations = 30
@@ -469,9 +469,9 @@ max_qa_iterations = 3                   # Maximum QA retry attempts before rollb
 # qa_backend = "claude(opus)"           # Override QA backend (default: planner-aligned)
 # Per-role backend overrides (optional):
 # planner_backend = "claude(opus)"
-# implementer_backend = "codex(gpt-5.3-codex-high)"
+# implementer_backend = "codex(gpt-5.4-high)"
 # reviewer_backend = "claude(opus)"
-# completer_backend = "codex(gpt-5.3-codex-xhigh)"
+# completer_backend = "codex(gpt-5.4-xhigh)"
 
 [templates]
 planner = "templates/spec.md"

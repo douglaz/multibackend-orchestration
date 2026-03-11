@@ -14,7 +14,7 @@ use ralph::project::state::{
 fn make_backends() -> FeatureLoopBackends {
     FeatureLoopBackends {
         planner: "claude(opus)".to_owned(),
-        implementer: "codex(gpt-5.3-codex-high)".to_owned(),
+        implementer: "codex(gpt-5.4-high)".to_owned(),
         reviewer: "claude(opus)".to_owned(),
         qa: "claude(opus)".to_owned(),
     }

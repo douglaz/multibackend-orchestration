@@ -536,7 +536,7 @@ mod tests {
                 artifact: "prompt-review",
                 file_name: "prompt-review.md",
                 project_id: "demo",
-                backend: "codex(gpt-5.3-codex-xhigh)",
+                backend: "codex(gpt-5.4-xhigh)",
                 role: "prompt_reviewer",
                 body: "# Prompt Review\n\n## Issues Found\n- mock\n\n## Refined Prompt\nThis is a sufficiently long refined prompt.",
             },
@@ -552,7 +552,7 @@ mod tests {
         let content = std::fs::read_to_string(path).expect("read artifact");
         assert!(content.contains("artifact: prompt-review"));
         assert!(content.contains("project: demo"));
-        assert!(content.contains("backend: codex(gpt-5.3-codex-xhigh)"));
+        assert!(content.contains("backend: codex(gpt-5.4-xhigh)"));
         assert!(content.contains("role: prompt_reviewer"));
         assert!(content.contains("created_at: "));
         assert!(
