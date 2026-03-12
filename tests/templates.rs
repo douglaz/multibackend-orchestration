@@ -112,7 +112,7 @@ fn test_default_implementer_template_contains_required_sections() {
     assert!(template.contains("{{review_feedback}}"));
     assert!(template.contains("{{review_history}}"));
     assert!(template.contains("{{master_prompt}}"));
-    assert!(template.contains("{{current_diff}}"));
+    assert!(template.contains("git diff"));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_default_reviewer_template_contains_required_sections() {
     assert!(template.contains("{{master_prompt}}"));
     assert!(template.contains("{{feature_spec}}"));
     assert!(template.contains("{{implementation_notes}}"));
-    assert!(template.contains("{{current_diff}}"));
+    assert!(template.contains("git diff"));
     assert!(template.contains("{{review_history}}"));
 }
 

@@ -12,8 +12,7 @@ use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegist
 use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverrides};
 use crate::error::RalphError;
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_and_push_phase_transition,
-    remove_stray_impl_artifacts, working_tree_diff_excluding_orchestration_state,
+    changed_paths_excluding_prefixes, commit_and_push_phase_transition, remove_stray_impl_artifacts,
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
@@ -339,14 +338,12 @@ impl QuickDevOrchestrator {
                 QuickDevPhase::PlanAndImplement => {
                     info!(loop_number, "quick-dev: PlanAndImplement phase");
 
-                    let git_diff = current_git_diff(&self.workspace.root)?;
                     let final_review_handoff =
                         pending_final_review_handoff.take().unwrap_or_default();
                     let mut prompt = build_plan_implement_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
-                        &git_diff,
                         &final_review_handoff,
                     )?;
 
@@ -503,13 +500,8 @@ impl QuickDevOrchestrator {
                         review_iteration, "quick-dev: CodexReview phase"
                     );
 
-                    let git_diff = current_git_diff(&self.workspace.root)?;
-                    let prompt = build_codex_review_prompt(
-                        effective,
-                        &prompt_content,
-                        &spec_content,
-                        &git_diff,
-                    )?;
+                    let prompt =
+                        build_codex_review_prompt(effective, &prompt_content, &spec_content)?;
 
                     let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
 
@@ -662,13 +654,11 @@ impl QuickDevOrchestrator {
                 QuickDevPhase::ApplyFixes => {
                     info!(loop_number, review_iteration, "quick-dev: ApplyFixes phase");
 
-                    let git_diff = current_git_diff(&self.workspace.root)?;
                     let prompt = build_apply_fixes_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
                         &last_review_feedback,
-                        &git_diff,
                     )?;
 
                     let impl_backend =
@@ -1454,20 +1444,6 @@ fn save_state_to_disk(state: &ProjectState, project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Git helpers
-// ---------------------------------------------------------------------------
-
-fn current_git_diff(workspace_root: &Path) -> Result<String> {
-    let Some(repo_root) = workspace_root.parent() else {
-        return Ok(String::new());
-    };
-    if !is_git_repo(repo_root) {
-        return Ok(String::new());
-    }
-    working_tree_diff_excluding_orchestration_state(repo_root)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn checkpoint_if_enabled(
     workspace: &Workspace,
@@ -1527,7 +1503,6 @@ fn build_plan_implement_prompt(
     effective: &EffectiveConfig,
     prompt_content: &str,
     spec_content: &str,
-    git_diff: &str,
     final_review_handoff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
@@ -1537,7 +1512,8 @@ fn build_plan_implement_prompt(
     );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("current_diff".to_owned(), git_diff.to_owned());
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     vars.insert(
         "final_review_handoff".to_owned(),
         final_review_handoff.to_owned(),
@@ -1549,7 +1525,6 @@ fn build_codex_review_prompt(
     effective: &EffectiveConfig,
     prompt_content: &str,
     spec_content: &str,
-    git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
     vars.insert(
@@ -1558,7 +1533,8 @@ fn build_codex_review_prompt(
     );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("current_diff".to_owned(), git_diff.to_owned());
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     build_quick_dev_codex_review_prompt(&effective.templates.quick_dev_codex_review, &vars)
 }
 
@@ -1567,7 +1543,6 @@ fn build_apply_fixes_prompt(
     prompt_content: &str,
     spec_content: &str,
     review_feedback: &str,
-    git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
     vars.insert(
@@ -1577,7 +1552,8 @@ fn build_apply_fixes_prompt(
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("review_feedback".to_owned(), review_feedback.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("current_diff".to_owned(), git_diff.to_owned());
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     build_quick_dev_apply_fixes_prompt(&effective.templates.quick_dev_apply_fixes, &vars)
 }
 

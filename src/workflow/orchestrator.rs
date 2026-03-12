@@ -22,8 +22,7 @@ use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, reso
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_initial_prompt,
     commit_and_push_phase_transition, commit_feature_loop, reset_and_clean_working_tree, rev_parse,
-    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
-    ORCHESTRATION_STATE_PATH_PREFIX,
+    stage_implementation_changes, ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
@@ -864,7 +863,6 @@ impl Orchestrator {
                         registry.get_or_create_for_role(&implementer_backend_name, "implementer")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
-                    let git_diff = current_git_diff(&self.workspace.root)?;
                     let iteration = state.phase_iteration;
 
                     if impl_notes_rel.is_none() {
@@ -909,7 +907,6 @@ impl Orchestrator {
                             implementer_backend.name(),
                             &planner_backend,
                             &spec_content,
-                            &git_diff,
                             None,
                             None,
                             &project_dir,
@@ -1067,7 +1064,6 @@ impl Orchestrator {
                             implementer_backend.name(),
                             &planner_backend,
                             &spec_content,
-                            &git_diff,
                             Some(iteration),
                             Some(&qa_feedback_content),
                             &project_dir,
@@ -1241,7 +1237,6 @@ impl Orchestrator {
                             implementer_backend.name(),
                             &planner_backend,
                             &spec_content,
-                            &git_diff,
                             Some(iteration),
                             Some(&labeled_feedback),
                             &project_dir,
@@ -1397,7 +1392,6 @@ impl Orchestrator {
                             implementer_backend.name(),
                             &planner_backend,
                             &spec_content,
-                            &git_diff,
                             Some(iteration),
                             Some(&feedback_content),
                             &project_dir,
@@ -1596,7 +1590,6 @@ impl Orchestrator {
                     })?;
                     let impl_notes_content =
                         read_project_relative_file(&project_dir, &impl_notes_rel)?;
-                    let git_diff = current_git_diff(&self.workspace.root)?;
 
                     // Session reuse: resolve session for QA (before history collection
                     // so we can pass actual session-reuse state to the history builder)
@@ -1644,7 +1637,6 @@ impl Orchestrator {
                         &planner_backend_name,
                         &spec_content,
                         &impl_notes_content,
-                        &git_diff,
                         &qa_history,
                     )?;
 
@@ -1854,7 +1846,6 @@ impl Orchestrator {
                         })?;
                         let impl_notes_content =
                             read_project_relative_file(&project_dir, &impl_notes_rel)?;
-                        let git_diff = current_git_diff(&self.workspace.root)?;
 
                         let previous_iteration = state.phase_iteration.saturating_sub(1);
                         let impl_response_content = if previous_iteration > 0 {
@@ -1912,7 +1903,6 @@ impl Orchestrator {
                             &spec_content,
                             &impl_notes_content,
                             impl_response_content.as_deref(),
-                            &git_diff,
                             &project_dir,
                             reviewer_session_id.is_some(),
                         )?;
@@ -3484,7 +3474,6 @@ fn build_implementer_prompt(
     backend: &str,
     opposite_backend: &str,
     spec_content: &str,
-    git_diff: &str,
     iteration: Option<u32>,
     review_feedback: Option<&str>,
     project_dir: &Path,
@@ -3510,11 +3499,9 @@ fn build_implementer_prompt(
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("spec_content".to_owned(), spec_content.to_owned());
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
-    vars.insert("git_diff".to_owned(), git_diff.to_owned());
-    vars.insert(
-        "current_diff".to_owned(),
-        format!("```diff\n{git_diff}\n```"),
-    );
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("git_diff".to_owned(), diff_instruction.to_owned());
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     let review_feedback_text = review_feedback.unwrap_or("(none)");
     vars.insert(
         "review_feedback".to_owned(),
@@ -3560,13 +3547,12 @@ fn build_implementer_prompt(
         "## Feature Spec",
         spec_content,
     );
-    let current_diff_block = format!("```diff\n{git_diff}\n```");
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["current_diff", "git_diff"],
         "## Current Diff",
-        &current_diff_block,
+        diff_instruction,
     );
     append_section_if_missing(
         &mut prompt,
@@ -3590,7 +3576,6 @@ fn build_reviewer_prompt(
     spec_content: &str,
     impl_notes_content: &str,
     impl_response_content: Option<&str>,
-    git_diff: &str,
     project_dir: &Path,
     session_reused_this_call: bool,
 ) -> Result<String> {
@@ -3619,11 +3604,9 @@ fn build_reviewer_prompt(
         "implementation_notes".to_owned(),
         impl_notes_content.to_owned(),
     );
-    vars.insert("git_diff".to_owned(), git_diff.to_owned());
-    vars.insert(
-        "current_diff".to_owned(),
-        format!("```diff\n{git_diff}\n```"),
-    );
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("git_diff".to_owned(), diff_instruction.to_owned());
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     let latest_impl_response = impl_response_content.unwrap_or("(none)");
     vars.insert(
         "latest_implementation_response".to_owned(),
@@ -3683,13 +3666,12 @@ fn build_reviewer_prompt(
         "## Latest Implementation Response",
         latest_impl_response,
     );
-    let current_diff_block = format!("```diff\n{git_diff}\n```");
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["current_diff", "git_diff"],
         "## Current Diff",
-        &current_diff_block,
+        diff_instruction,
     );
     Ok(prompt)
 }
@@ -5378,7 +5360,6 @@ fn build_qa_prompt(
     opposite_backend: &str,
     spec_content: &str,
     impl_notes_content: &str,
-    git_diff: &str,
     qa_history: &str,
 ) -> Result<String> {
     let template_source = load_template_source(&effective.templates.qa, default_qa_template());
@@ -5405,11 +5386,9 @@ fn build_qa_prompt(
         "implementation_notes".to_owned(),
         impl_notes_content.to_owned(),
     );
-    vars.insert("git_diff".to_owned(), git_diff.to_owned());
-    vars.insert(
-        "current_diff".to_owned(),
-        format!("```diff\n{git_diff}\n```"),
-    );
+    let diff_instruction = "To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.";
+    vars.insert("git_diff".to_owned(), diff_instruction.to_owned());
+    vars.insert("current_diff".to_owned(), diff_instruction.to_owned());
     let qa_history_text = if qa_history.is_empty() {
         "(none)"
     } else {
@@ -5450,13 +5429,12 @@ fn build_qa_prompt(
         "## Implementation Notes",
         impl_notes_content,
     );
-    let current_diff_block = format!("```diff\n{git_diff}\n```");
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["current_diff", "git_diff"],
         "## Current Diff",
-        &current_diff_block,
+        diff_instruction,
     );
     append_section_if_missing(
         &mut prompt,
@@ -5637,17 +5615,6 @@ fn ensure_clean_start_for_new_loop(workspace_root: &Path) -> Result<()> {
     Err(RalphError::Validation(format!(
         "cannot start a new loop with uncommitted changes outside `.ralph/`.\ncommit/stash/discard those paths first:\n{sample}{remainder}"
     )))
-}
-
-fn current_git_diff(workspace_root: &Path) -> Result<String> {
-    let Some(repo_root) = workspace_root.parent() else {
-        return Ok(String::new());
-    };
-    if !is_git_repo(repo_root) {
-        return Ok(String::new());
-    }
-
-    working_tree_diff_excluding_orchestration_state(repo_root)
 }
 
 fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {

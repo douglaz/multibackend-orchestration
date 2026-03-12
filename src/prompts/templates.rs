@@ -167,7 +167,7 @@ If this is a review-response pass, output `<TS>-impl-response-III.md` in this fo
 {{master_prompt}}
 
 ## Current Diff
-{{current_diff}}
+To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.
 "#
 }
 
@@ -247,7 +247,7 @@ OR:
 {{latest_implementation_response}}
 
 ## Implementation Diff
-{{current_diff}}
+To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.
 
 ### Review History (prior iterations)
 {{review_history}}
@@ -388,7 +388,7 @@ If any checks fail:
 {{implementation_notes}}
 
 ## Implementation Diff
-{{current_diff}}
+To see the current implementation changes, run `git diff` in the repository root. You can also use `git diff --stat` for an overview, then read specific files as needed.
 
 ## Prior QA History
 {{prior_qa_history}}
