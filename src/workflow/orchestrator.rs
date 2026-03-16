@@ -5990,6 +5990,62 @@ where
 
     let mut latest_unparsed_output = first_output;
 
+    // ── Stale-session detection ─────────────────────────────────────────
+    // When a *resumed* session (initial_session_id provided) returns output
+    // that fails to parse, the session is likely stale — e.g. Claude responds
+    // with "Stale background task. All work is complete." which doesn't
+    // conform to any expected role format.
+    //
+    // Sending an in-session correction prompt to a stale session (Attempt 2)
+    // would hang for the full idle timeout (typically 2h). Instead, invalidate
+    // the session and retry fresh with the original prompt.
+    if initial_session_id.is_some() && parse_error_first.is_some() {
+        warn!(
+            role = role,
+            backend = %backend_name,
+            session_id = ?active_session_id,
+            output_len = latest_unparsed_output.len(),
+            "resumed session returned non-conforming output, invalidating session for fresh retry"
+        );
+        active_session_id = None;
+        registry.override_session_id(None).await;
+
+        let fresh_raw = execute_with_timeout_retries(
+            backend.clone(),
+            role,
+            phase,
+            original_prompt,
+            timeout_secs,
+            log_writer,
+            repo_root,
+            cancel,
+            max_retries_configured,
+        )
+        .await?;
+        attempts_executed += 1;
+        let fresh_normalized = normalize_backend_output(&backend_name, &fresh_raw);
+        log_parse_retry_token_metrics(
+            role,
+            phase,
+            loop_number,
+            attempts_executed,
+            &backend_name,
+            false,
+            &fresh_normalized,
+        );
+        if fresh_normalized.session_id.is_some() {
+            active_session_id = fresh_normalized.session_id.clone();
+            last_session_id = fresh_normalized.session_id.clone();
+        }
+        if let Ok(parsed) = parse_fn(&fresh_normalized.text) {
+            return Ok(ParseRetryResult {
+                parsed,
+                session_id: last_session_id,
+            });
+        }
+        latest_unparsed_output = fresh_normalized.text;
+    }
+
     // Attempt 2: in-session follow-up only when a session is active after attempt 1.
     if active_session_id.is_some() {
         let resume_session_id = validate_session_rewrite(
