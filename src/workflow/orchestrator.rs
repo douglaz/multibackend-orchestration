@@ -5887,6 +5887,9 @@ where
         &loop_dir_hint,
         role,
     );
+    // Track whether attempt 1 actually used a resumed session (i.e. session
+    // rewrite validation passed). Used to gate stale-session detection.
+    let attempt1_used_session = active_session_id.is_some();
     let mut last_session_id: Option<String> = None;
 
     registry
@@ -5989,6 +5992,67 @@ where
     };
 
     let mut latest_unparsed_output = first_output;
+
+    // ── Stale-session detection ─────────────────────────────────────────
+    // When attempt 1 actually reused a session and returns output that fails
+    // to parse, the session is likely stale — e.g. Claude responds with
+    // "Stale background task. All work is complete." which doesn't conform
+    // to any expected role format.
+    //
+    // Sending an in-session correction prompt to a stale session (Attempt 2)
+    // would hang for the full idle timeout (typically 2h). Instead, invalidate
+    // the session and retry fresh with the original prompt.
+    //
+    // We gate on `attempt1_used_session` (not `initial_session_id.is_some()`)
+    // so that if validate_session_rewrite already disabled reuse, the first
+    // call was already fresh and we don't waste an extra retry.
+    if attempt1_used_session && parse_error_first.is_some() {
+        warn!(
+            role = role,
+            backend = %backend_name,
+            session_id = ?active_session_id,
+            output_len = latest_unparsed_output.len(),
+            "resumed session returned non-conforming output, invalidating session for fresh retry"
+        );
+        active_session_id = None;
+        last_session_id = None;
+        registry.override_session_id(None).await;
+
+        let fresh_raw = execute_with_timeout_retries(
+            backend.clone(),
+            role,
+            phase,
+            original_prompt,
+            timeout_secs,
+            log_writer,
+            repo_root,
+            cancel,
+            max_retries_configured,
+        )
+        .await?;
+        attempts_executed += 1;
+        let fresh_normalized = normalize_backend_output(&backend_name, &fresh_raw);
+        log_parse_retry_token_metrics(
+            role,
+            phase,
+            loop_number,
+            attempts_executed,
+            &backend_name,
+            false,
+            &fresh_normalized,
+        );
+        if fresh_normalized.session_id.is_some() {
+            active_session_id = fresh_normalized.session_id.clone();
+            last_session_id = fresh_normalized.session_id.clone();
+        }
+        if let Ok(parsed) = parse_fn(&fresh_normalized.text) {
+            return Ok(ParseRetryResult {
+                parsed,
+                session_id: last_session_id,
+            });
+        }
+        latest_unparsed_output = fresh_normalized.text;
+    }
 
     // Attempt 2: in-session follow-up only when a session is active after attempt 1.
     if active_session_id.is_some() {
@@ -7784,6 +7848,10 @@ mod tests {
         async fn call_count(&self) -> usize {
             self.prompts.lock().await.len()
         }
+
+        async fn recorded_prompts(&self) -> Vec<String> {
+            self.prompts.lock().await.clone()
+        }
     }
 
     #[async_trait]
@@ -8056,6 +8124,141 @@ mod tests {
             assert_eq!(event.tokens_out, 0);
             assert_eq!(event.cached_in, 0);
         }
+    }
+
+    #[test]
+    fn stale_resumed_session_invalidates_and_retries_fresh() {
+        // Regression test for issue #208: when a resumed session returns a
+        // non-conforming response (e.g. "Stale background task"), the
+        // orchestrator should invalidate the session and retry fresh with
+        // the original prompt — NOT send a correction to the stale session
+        // (which would hang for the full idle timeout).
+        ensure_test_tracing_subscriber();
+        let temp = tempdir().expect("temp dir");
+
+        // Response 1: stale session output (non-parseable, but >20 chars).
+        // Response 2: fresh retry with parseable output.
+        let backend = SequencedBackend::new(
+            "mock-stale-backend",
+            vec![
+                "Stale background task. All work is complete.".to_owned(),
+                "# Implementation Notes\n## Changes Made\nFresh retry succeeded.".to_owned(),
+            ],
+        );
+        let backend_handle = backend.clone();
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
+        let mut log = LogWriter::open(temp.path(), "stale-test", Some(1), "implementer");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let cancel = CancellationToken::new();
+        let result = runtime.block_on(execute_with_parse_retries(
+            backend,
+            &registry,
+            "implementer",
+            "implementing",
+            1,
+            "original prompt for implementation",
+            Some("stale-session-id-123"), // resumed session
+            |raw| -> crate::Result<String> {
+                if raw.contains("# Implementation Notes") {
+                    Ok(raw.to_owned())
+                } else {
+                    Err(RalphError::ParseError("missing top-level H1".to_owned()))
+                }
+            },
+            "# Implementation Notes",
+            30,
+            &mut log,
+            None,
+            None,
+            &cancel,
+            None,
+        ));
+
+        // The fresh retry should succeed.
+        assert!(
+            result.is_ok(),
+            "expected fresh retry to succeed after stale session"
+        );
+
+        // Exactly 2 backend calls: stale response + fresh retry.
+        // Without the fix, the orchestrator would send a correction to the
+        // stale session (Attempt 2), potentially hanging for 2h.
+        assert_eq!(
+            runtime.block_on(backend_handle.call_count()),
+            2,
+            "should make exactly 2 calls: stale response + fresh retry"
+        );
+
+        // The second call should use the original prompt, not a correction prompt.
+        let prompts = runtime.block_on(backend_handle.recorded_prompts());
+        assert_eq!(
+            prompts[1], "original prompt for implementation",
+            "fresh retry should use the original prompt, not a correction prompt"
+        );
+    }
+
+    #[test]
+    fn stale_resumed_session_clears_last_session_id() {
+        // Regression test for PR #209 review: when a stale session emitted a
+        // session_id in its JSON output, that ID must NOT be persisted after
+        // invalidation. If the fresh retry doesn't emit a new session_id, the
+        // returned session_id should be None.
+        ensure_test_tracing_subscriber();
+        let temp = tempdir().expect("temp dir");
+
+        // Response 1: Claude JSON with session_id — simulates the stale session
+        // returning a session_id in its structured output. Content is non-parseable.
+        // Response 2: parseable plain text (no session_id).
+        let backend = SequencedBackend::new(
+            "claude-stale-sid",
+            vec![
+                r#"{"session_id":"stale-sid-should-be-cleared","content":[{"type":"text","text":"Stale background task. All work is complete."}]}"#.to_owned(),
+                "# Implementation Notes\n## Changes Made\nFresh retry succeeded.".to_owned(),
+            ],
+        );
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
+        let mut log = LogWriter::open(temp.path(), "stale-sid-test", Some(1), "implementer");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let cancel = CancellationToken::new();
+        let result = runtime.block_on(execute_with_parse_retries(
+            backend,
+            &registry,
+            "implementer",
+            "implementing",
+            1,
+            "original prompt",
+            Some("stale-sid-should-be-cleared"), // resumed session
+            |raw| -> crate::Result<String> {
+                if raw.contains("# Implementation Notes") {
+                    Ok(raw.to_owned())
+                } else {
+                    Err(RalphError::ParseError("missing top-level H1".to_owned()))
+                }
+            },
+            "# Implementation Notes",
+            30,
+            &mut log,
+            None,
+            None,
+            &cancel,
+            None,
+        ));
+
+        let retry_result = result.expect("fresh retry should succeed");
+        assert_eq!(
+            retry_result.session_id, None,
+            "stale session_id must be cleared — should not persist 'stale-sid-should-be-cleared'"
+        );
     }
 
     // --- Bootstrap hash determinism and invalidation tests ---
