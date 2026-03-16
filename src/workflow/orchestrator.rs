@@ -5887,6 +5887,9 @@ where
         &loop_dir_hint,
         role,
     );
+    // Track whether attempt 1 actually used a resumed session (i.e. session
+    // rewrite validation passed). Used to gate stale-session detection.
+    let attempt1_used_session = active_session_id.is_some();
     let mut last_session_id: Option<String> = None;
 
     registry
@@ -5991,15 +5994,19 @@ where
     let mut latest_unparsed_output = first_output;
 
     // ── Stale-session detection ─────────────────────────────────────────
-    // When a *resumed* session (initial_session_id provided) returns output
-    // that fails to parse, the session is likely stale — e.g. Claude responds
-    // with "Stale background task. All work is complete." which doesn't
-    // conform to any expected role format.
+    // When attempt 1 actually reused a session and returns output that fails
+    // to parse, the session is likely stale — e.g. Claude responds with
+    // "Stale background task. All work is complete." which doesn't conform
+    // to any expected role format.
     //
     // Sending an in-session correction prompt to a stale session (Attempt 2)
     // would hang for the full idle timeout (typically 2h). Instead, invalidate
     // the session and retry fresh with the original prompt.
-    if initial_session_id.is_some() && parse_error_first.is_some() {
+    //
+    // We gate on `attempt1_used_session` (not `initial_session_id.is_some()`)
+    // so that if validate_session_rewrite already disabled reuse, the first
+    // call was already fresh and we don't waste an extra retry.
+    if attempt1_used_session && parse_error_first.is_some() {
         warn!(
             role = role,
             backend = %backend_name,
@@ -6008,6 +6015,7 @@ where
             "resumed session returned non-conforming output, invalidating session for fresh retry"
         );
         active_session_id = None;
+        last_session_id = None;
         registry.override_session_id(None).await;
 
         let fresh_raw = execute_with_timeout_retries(
