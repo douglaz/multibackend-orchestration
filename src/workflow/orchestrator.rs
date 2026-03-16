@@ -8202,6 +8202,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stale_resumed_session_clears_last_session_id() {
+        // Regression test for PR #209 review: when a stale session emitted a
+        // session_id in its JSON output, that ID must NOT be persisted after
+        // invalidation. If the fresh retry doesn't emit a new session_id, the
+        // returned session_id should be None.
+        ensure_test_tracing_subscriber();
+        let temp = tempdir().expect("temp dir");
+
+        // Response 1: Claude JSON with session_id — simulates the stale session
+        // returning a session_id in its structured output. Content is non-parseable.
+        // Response 2: parseable plain text (no session_id).
+        let backend = SequencedBackend::new(
+            "claude-stale-sid",
+            vec![
+                r#"{"session_id":"stale-sid-should-be-cleared","content":[{"type":"text","text":"Stale background task. All work is complete."}]}"#.to_owned(),
+                "# Implementation Notes\n## Changes Made\nFresh retry succeeded.".to_owned(),
+            ],
+        );
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
+        let mut log = LogWriter::open(temp.path(), "stale-sid-test", Some(1), "implementer");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let cancel = CancellationToken::new();
+        let result = runtime.block_on(execute_with_parse_retries(
+            backend,
+            &registry,
+            "implementer",
+            "implementing",
+            1,
+            "original prompt",
+            Some("stale-sid-should-be-cleared"), // resumed session
+            |raw| -> crate::Result<String> {
+                if raw.contains("# Implementation Notes") {
+                    Ok(raw.to_owned())
+                } else {
+                    Err(RalphError::ParseError("missing top-level H1".to_owned()))
+                }
+            },
+            "# Implementation Notes",
+            30,
+            &mut log,
+            None,
+            None,
+            &cancel,
+            None,
+        ));
+
+        let retry_result = result.expect("fresh retry should succeed");
+        assert_eq!(
+            retry_result.session_id, None,
+            "stale session_id must be cleared — should not persist 'stale-sid-should-be-cleared'"
+        );
+    }
+
     // --- Bootstrap hash determinism and invalidation tests ---
 
     #[test]
