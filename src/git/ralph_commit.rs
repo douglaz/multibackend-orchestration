@@ -155,10 +155,14 @@ pub fn parse_last_ralph_commit(
             Ok(parsed) if parsed.project_id == project_id => return Ok(Some(parsed)),
             Ok(_) => continue, // different project, skip
             Err(err) => {
-                // Only fail loudly if this looks like it belongs to our project
-                // (subject prefix matches) but is malformed.  For other projects'
-                // malformed commits we just skip silently.
-                if subject.starts_with(&format!("ralph({project_id})")) {
+                // Fail loudly if this commit likely belongs to our project but
+                // is malformed.  Check both the subject prefix and the trailer
+                // so that subject/trailer project-id mismatches (e.g. subject
+                // says ralph(issue-24) but Ralph-Project: issue-42) are still
+                // caught when one side references our project.
+                let mentions_project = subject.starts_with(&format!("ralph({project_id})"))
+                    || body.contains(&format!("Ralph-Project: {project_id}"));
+                if mentions_project {
                     return Err(RalphError::ParseError(format!(
                         "malformed Ralph checkpoint commit {hash} for project {project_id}: {err}"
                     )));
@@ -213,7 +217,9 @@ pub fn list_ralph_commits(
             Ok(parsed) if parsed.project_id == project_id => commits.push(parsed),
             Ok(_) => continue, // different project, skip
             Err(err) => {
-                if commits.is_empty() && subject.starts_with(&format!("ralph({project_id})")) {
+                let mentions_project = subject.starts_with(&format!("ralph({project_id})"))
+                    || body.contains(&format!("Ralph-Project: {project_id}"));
+                if commits.is_empty() && mentions_project {
                     // Newest commit for this project is malformed — fail loudly.
                     return Err(RalphError::ParseError(format!(
                         "malformed Ralph checkpoint commit {hash} for project {project_id}: {err}"
