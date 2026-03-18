@@ -112,7 +112,7 @@ fn collect_checkpoint_history(
         return Ok(Vec::new());
     };
 
-    let commits = list_ralph_commits(&git_ctx.repo_root, &git_ctx.branch)?;
+    let commits = list_ralph_commits(&git_ctx.repo_root, &git_ctx.branch, project_id)?;
     if commits.is_empty() {
         return Ok(Vec::new());
     }

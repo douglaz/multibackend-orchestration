@@ -40,6 +40,7 @@ pub struct CreateProjectOptions {
 pub struct ProjectGitContext {
     pub repo_root: PathBuf,
     pub branch: String,
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +135,7 @@ pub fn project_git_context(workspace: &Workspace, project_id: &str) -> Option<Pr
     Some(ProjectGitContext {
         repo_root,
         branch: resolve_branch_name(&workspace.config.git.branch_format, project_id),
+        project_id: project_id.to_owned(),
     })
 }
 
@@ -260,8 +262,8 @@ fn reconstruct_project_state_internal(
     let (mut checkpoint_loop, mut checkpoint_phase, checkpoint_commits) = match (repo_root, branch)
     {
         (Some(root), Some(branch_name)) if is_git_repo(root) => {
-            let (loop_number, phase) = derive_position(root, branch_name)?;
-            let commits = list_ralph_commits(root, branch_name)?;
+            let (loop_number, phase) = derive_position(root, branch_name, project_id)?;
+            let commits = list_ralph_commits(root, branch_name, project_id)?;
             (loop_number, phase, commits)
         }
         _ => (1, Phase::Planning, Vec::new()),
