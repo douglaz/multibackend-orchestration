@@ -120,7 +120,11 @@ fn resolve_checkpoint_ref(repo_root: &Path, branch: &str) -> Result<Option<Strin
 ///
 /// Falls back to the local branch when it is ahead of the remote (e.g. after a
 /// push failure).
-pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<RalphCommitInfo>> {
+pub fn parse_last_ralph_commit(
+    repo_root: &Path,
+    branch: &str,
+    project_id: &str,
+) -> Result<Option<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
 
     let checkpoint_ref = match resolve_checkpoint_ref(repo_root, branch)? {
@@ -147,13 +151,25 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
             continue;
         }
 
-        // This is the newest Ralph checkpoint commit — validate strictly.
-        let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
-            RalphError::ParseError(format!(
-                "malformed newest Ralph checkpoint commit {hash}: {err}"
-            ))
-        })?;
-        return Ok(Some(parsed));
+        match parse_ralph_commit(subject, body, Some(hash)) {
+            Ok(parsed) if parsed.project_id == project_id => return Ok(Some(parsed)),
+            Ok(_) => continue, // different project, skip
+            Err(err) => {
+                // Fail loudly if this commit likely belongs to our project but
+                // is malformed.  Check both the subject prefix and the trailer
+                // so that subject/trailer project-id mismatches (e.g. subject
+                // says ralph(issue-24) but Ralph-Project: issue-42) are still
+                // caught when one side references our project.
+                let mentions_project = subject.starts_with(&format!("ralph({project_id})"))
+                    || body.contains(&format!("Ralph-Project: {project_id}"));
+                if mentions_project {
+                    return Err(RalphError::ParseError(format!(
+                        "malformed Ralph checkpoint commit {hash} for project {project_id}: {err}"
+                    )));
+                }
+                continue;
+            }
+        }
     }
 
     Ok(None)
@@ -165,7 +181,11 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
 /// Only the newest Ralph checkpoint must be well-formed.  Older malformed
 /// commits are silently skipped so that historical format changes do not
 /// break derivation when a newer valid checkpoint exists.
-pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCommitInfo>> {
+pub fn list_ralph_commits(
+    repo_root: &Path,
+    branch: &str,
+    project_id: &str,
+) -> Result<Vec<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
 
     let checkpoint_ref = match resolve_checkpoint_ref(repo_root, branch)? {
@@ -183,7 +203,6 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
     )?;
 
     let mut commits = Vec::new();
-    let mut is_newest = true;
     for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
         let mut fields = record.splitn(3, '\x1f');
         let hash = fields.next().unwrap_or("").trim();
@@ -194,19 +213,19 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
             continue;
         }
 
-        if is_newest {
-            // Newest Ralph checkpoint must be valid — fail loudly if not.
-            let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
-                RalphError::ParseError(format!(
-                    "malformed newest Ralph checkpoint commit {hash}: {err}"
-                ))
-            })?;
-            commits.push(parsed);
-            is_newest = false;
-        } else {
-            // Older commits: skip silently if malformed.
-            if let Ok(parsed) = parse_ralph_commit(subject, body, Some(hash)) {
-                commits.push(parsed);
+        match parse_ralph_commit(subject, body, Some(hash)) {
+            Ok(parsed) if parsed.project_id == project_id => commits.push(parsed),
+            Ok(_) => continue, // different project, skip
+            Err(err) => {
+                let mentions_project = subject.starts_with(&format!("ralph({project_id})"))
+                    || body.contains(&format!("Ralph-Project: {project_id}"));
+                if commits.is_empty() && mentions_project {
+                    // Newest commit for this project is malformed — fail loudly.
+                    return Err(RalphError::ParseError(format!(
+                        "malformed Ralph checkpoint commit {hash} for project {project_id}: {err}"
+                    )));
+                }
+                // Older malformed commits or other projects: skip silently.
             }
         }
     }
@@ -214,8 +233,8 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
     Ok(commits)
 }
 
-pub fn derive_position(repo_root: &Path, branch: &str) -> Result<(u32, Phase)> {
-    match parse_last_ralph_commit(repo_root, branch)? {
+pub fn derive_position(repo_root: &Path, branch: &str, project_id: &str) -> Result<(u32, Phase)> {
+    match parse_last_ralph_commit(repo_root, branch, project_id)? {
         Some(info) => Ok((info.loop_number, info.phase)),
         None => Ok((1, Phase::Planning)),
     }
@@ -490,7 +509,8 @@ mod tests {
     #[test]
     fn derive_position_defaults_when_no_ralph_commit_exists() {
         let repo = init_local_repo();
-        let position = derive_position(repo.path(), "ralph/issue-42").expect("derive should work");
+        let position =
+            derive_position(repo.path(), "ralph/issue-42", "issue-42").expect("derive should work");
         assert_eq!(position, (1, Phase::Planning));
     }
 
@@ -510,7 +530,7 @@ mod tests {
         commit_empty_with_message(&repo, &second);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 
-        let parsed = parse_last_ralph_commit(&repo, "ralph/issue-42")
+        let parsed = parse_last_ralph_commit(&repo, "ralph/issue-42", "issue-42")
             .expect("parse should succeed")
             .expect("ralph commit should exist");
         assert_eq!(parsed.project_id, "issue-42");
@@ -535,13 +555,13 @@ mod tests {
         commit_empty_with_message(&repo, malformed);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 
-        let result = parse_last_ralph_commit(&repo, "ralph/issue-42");
+        let result = parse_last_ralph_commit(&repo, "ralph/issue-42", "issue-42");
         assert!(result.is_err(), "malformed newest checkpoint should error");
 
         // Error should include commit context for actionable debugging.
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("malformed newest Ralph checkpoint commit"),
+            err_msg.contains("malformed Ralph checkpoint commit"),
             "error should include commit context, got: {err_msg}"
         );
     }
@@ -562,14 +582,14 @@ mod tests {
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 
         // parse_last_ralph_commit should succeed (newest is valid).
-        let parsed = parse_last_ralph_commit(&repo, "ralph/issue-42")
+        let parsed = parse_last_ralph_commit(&repo, "ralph/issue-42", "issue-42")
             .expect("parse should succeed when newest is valid")
             .expect("ralph commit should exist");
         assert_eq!(parsed.loop_number, 2);
         assert_eq!(parsed.phase, Phase::Reviewing);
 
         // list_ralph_commits should also succeed, skipping the older malformed one.
-        let commits = super::list_ralph_commits(&repo, "ralph/issue-42")
+        let commits = super::list_ralph_commits(&repo, "ralph/issue-42", "issue-42")
             .expect("list should succeed with older malformed commit");
         assert_eq!(
             commits.len(),
@@ -596,8 +616,8 @@ mod tests {
             build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
         commit_empty_with_message(&repo, &local_msg);
 
-        let (loop_number, phase) =
-            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "issue-42")
+            .expect("derive_position should succeed");
         assert_eq!(loop_number, 2, "should read local-ahead checkpoint");
         assert_eq!(phase, Phase::Reviewing);
     }
@@ -620,8 +640,8 @@ mod tests {
         // Reset local branch back to loop-1 (simulates stale local).
         git_ok(&repo, &["reset", "--hard", "HEAD~1"]);
 
-        let (loop_number, phase) =
-            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "issue-42")
+            .expect("derive_position should succeed");
         assert_eq!(
             loop_number, 2,
             "should read remote checkpoint when local is behind"
@@ -654,8 +674,8 @@ mod tests {
             build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::QA);
         commit_empty_with_message(&repo, &diverged_msg);
 
-        let (loop_number, phase) =
-            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "issue-42")
+            .expect("derive_position should succeed");
         assert_eq!(loop_number, 2, "should read local checkpoint when diverged");
         assert_eq!(
             phase,
@@ -671,8 +691,8 @@ mod tests {
         let (_temp, repo) = init_repo_with_remote();
 
         // The branch ralph/issue-42 exists, so test with a non-existent branch.
-        let (loop_number, phase) =
-            derive_position(&repo, "ralph/issue-999").expect("derive_position should succeed");
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-999", "issue-999")
+            .expect("derive_position should succeed");
         assert_eq!(loop_number, 1, "no-ref default loop should be 1");
         assert_eq!(
             phase,
@@ -696,8 +716,8 @@ mod tests {
         git_ok(&repo, &["checkout", "master"]);
         git_ok(&repo, &["branch", "-D", "ralph/issue-42"]);
 
-        let (loop_number, phase) =
-            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "issue-42")
+            .expect("derive_position should succeed");
         assert_eq!(loop_number, 1, "should read remote-only checkpoint");
         assert_eq!(phase, Phase::Implementing);
     }
@@ -707,11 +727,11 @@ mod tests {
         let (_temp, repo) = init_repo_with_remote();
 
         // No Ralph checkpoint commits exist at all.
-        let result = parse_last_ralph_commit(&repo, "ralph/issue-42")
+        let result = parse_last_ralph_commit(&repo, "ralph/issue-42", "issue-42")
             .expect("parse should succeed with no checkpoints");
         assert!(result.is_none(), "no checkpoint should return None");
 
-        let (loop_number, phase) = super::derive_position(&repo, "ralph/issue-42")
+        let (loop_number, phase) = super::derive_position(&repo, "ralph/issue-42", "issue-42")
             .expect("derive_position should succeed");
         assert_eq!(loop_number, 1, "no-checkpoint default loop should be 1");
         assert_eq!(
@@ -719,5 +739,69 @@ mod tests {
             Phase::Planning,
             "no-checkpoint default phase should be planning"
         );
+    }
+
+    /// When merged history contains ralph commits from a different project,
+    /// derive_position should ignore them and return the default.
+    /// Reproduces: https://github.com/douglaz/multibackend-orchestration/issues/210
+    #[test]
+    fn derive_position_ignores_commits_from_different_project() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push a checkpoint for project "old-project" to ralph/issue-42.
+        let old_msg =
+            build_ralph_commit_message("old-project", 12, Phase::Completing, Phase::FinalReview);
+        commit_empty_with_message(&repo, &old_msg);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // derive_position for "new-project" should ignore old-project's commit.
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "new-project")
+            .expect("derive_position should succeed");
+        assert_eq!(loop_number, 1, "should default to loop 1 for new project");
+        assert_eq!(
+            phase,
+            Phase::Planning,
+            "should default to planning for new project"
+        );
+
+        // derive_position for "old-project" should still find it.
+        let (loop_number, phase) = derive_position(&repo, "ralph/issue-42", "old-project")
+            .expect("derive_position should succeed");
+        assert_eq!(loop_number, 12, "should find old-project checkpoint");
+        assert_eq!(phase, Phase::FinalReview);
+    }
+
+    /// list_ralph_commits should only return commits for the requested project.
+    #[test]
+    fn list_ralph_commits_filters_by_project_id() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push checkpoints for two different projects on the same branch.
+        let msg_a =
+            build_ralph_commit_message("project-a", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&repo, &msg_a);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        let msg_b = build_ralph_commit_message("project-b", 5, Phase::Reviewing, Phase::Committing);
+        commit_empty_with_message(&repo, &msg_b);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        let msg_a2 =
+            build_ralph_commit_message("project-a", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&repo, &msg_a2);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // list for project-a should return only its 2 commits.
+        let commits_a = super::list_ralph_commits(&repo, "ralph/issue-42", "project-a")
+            .expect("list should succeed for project-a");
+        assert_eq!(commits_a.len(), 2, "project-a should have 2 commits");
+        assert_eq!(commits_a[0].loop_number, 2);
+        assert_eq!(commits_a[1].loop_number, 1);
+
+        // list for project-b should return only its 1 commit.
+        let commits_b = super::list_ralph_commits(&repo, "ralph/issue-42", "project-b")
+            .expect("list should succeed for project-b");
+        assert_eq!(commits_b.len(), 1, "project-b should have 1 commit");
+        assert_eq!(commits_b[0].loop_number, 5);
     }
 }

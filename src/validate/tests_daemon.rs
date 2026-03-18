@@ -4049,8 +4049,8 @@ fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestRe
         )
         .expect("first checkpoint should succeed");
 
-        let (loop_num, phase) =
-            derive_position(&clone, "ralph/issue-55").expect("derive_position should succeed");
+        let (loop_num, phase) = derive_position(&clone, "ralph/issue-55", "issue-55")
+            .expect("derive_position should succeed");
         assert_eq!(loop_num, 1, "expected loop 1 after first checkpoint");
         assert_eq!(
             phase,
@@ -4070,8 +4070,8 @@ fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestRe
         )
         .expect("second checkpoint should succeed");
 
-        let (loop_num, phase) =
-            derive_position(&clone, "ralph/issue-55").expect("derive_position should succeed");
+        let (loop_num, phase) = derive_position(&clone, "ralph/issue-55", "issue-55")
+            .expect("derive_position should succeed");
         assert_eq!(loop_num, 2, "expected loop 2 after second checkpoint");
         assert_eq!(
             phase,

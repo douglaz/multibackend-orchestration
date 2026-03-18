@@ -697,8 +697,8 @@ mod tests {
         let local_head = git_output(&work, &["rev-parse", "HEAD"]);
         assert_ne!(local_head, remote_head, "local should diverge from remote");
 
-        let before_sync_position =
-            derive_position(&work, "ralph/issue-42").expect("derive_position before sync");
+        let before_sync_position = derive_position(&work, "ralph/issue-42", "issue-42")
+            .expect("derive_position before sync");
         assert_eq!(
             before_sync_position,
             (2, Phase::Reviewing),
@@ -713,8 +713,8 @@ mod tests {
             "sync should reset local branch to remote checkpoint"
         );
 
-        let after_sync_position =
-            derive_position(&work, "ralph/issue-42").expect("derive_position after sync");
+        let after_sync_position = derive_position(&work, "ralph/issue-42", "issue-42")
+            .expect("derive_position after sync");
         assert_eq!(
             after_sync_position,
             (1, Phase::Implementing),

@@ -646,8 +646,9 @@ fn collect_phase_snapshot(
     git_context: Option<&crate::project::lifecycle::ProjectGitContext>,
 ) -> Option<PhaseSnapshot> {
     let ctx = git_context?;
-    let (current_loop, current_phase) = derive_position(&ctx.repo_root, &ctx.branch).ok()?;
-    let checkpoint_hash = parse_last_ralph_commit(&ctx.repo_root, &ctx.branch)
+    let (current_loop, current_phase) =
+        derive_position(&ctx.repo_root, &ctx.branch, &ctx.project_id).ok()?;
+    let checkpoint_hash = parse_last_ralph_commit(&ctx.repo_root, &ctx.branch, &ctx.project_id)
         .ok()
         .flatten()
         .and_then(|commit| commit.commit_hash);

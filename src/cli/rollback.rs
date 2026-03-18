@@ -84,14 +84,9 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .filter(|r| is_git_repo(r))
         .and_then(|repo_root| {
             let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-            list_ralph_commits(repo_root, &branch)
+            list_ralph_commits(repo_root, &branch, &project_id)
                 .ok()
-                .and_then(|commits| {
-                    commits
-                        .iter()
-                        .find(|c| c.project_id == project_id)
-                        .and_then(|c| c.commit_hash.clone())
-                })
+                .and_then(|commits| commits.first().and_then(|c| c.commit_hash.clone()))
         });
 
     // Dry-run: resolve ref early for display (read-only, no branch mutations).
@@ -520,9 +515,9 @@ fn find_checkpoint_commit(
     project_id: &str,
     target_loop_number: u32,
 ) -> Result<Option<String>> {
-    let commits = list_ralph_commits(repo_root, branch)?;
+    let commits = list_ralph_commits(repo_root, branch, project_id)?;
     for commit in &commits {
-        if commit.project_id == project_id && commit.loop_number <= target_loop_number {
+        if commit.loop_number <= target_loop_number {
             if let Some(hash) = commit.commit_hash.as_deref() {
                 return Ok(Some(hash.to_owned()));
             }
