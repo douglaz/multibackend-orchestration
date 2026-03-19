@@ -71,6 +71,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: existing_bot_marker_skips_oracle,
         },
         ConformanceTest {
+            name: "daemon_oracle_review::embedded_marker_does_not_suppress_oracle",
+            func: embedded_marker_does_not_suppress_oracle,
+        },
+        ConformanceTest {
             name: "daemon_oracle_review::oracle_timeout_does_not_advance_state",
             func: oracle_timeout_does_not_advance_state,
         },
@@ -714,6 +718,75 @@ fn existing_bot_marker_skips_oracle(h: &RalphHarness) -> TestResult {
             .unwrap_or_default()
             .is_empty());
         let state = load_oracle_state(&dh).expect("state should self-heal");
+        assert_eq!(state.reviewed.get("11"), Some(&"sha-11".to_owned()));
+    })
+}
+
+fn embedded_marker_does_not_suppress_oracle(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let oracle_log = path_in_temp(&dh, "oracle.log");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        write_comment_log(
+            &comments_file,
+            &[comment_line(
+                5001,
+                "ralph-bot",
+                "some preamble\n<!-- ralph:oracle-review:11:sha-11 -->\nstuff",
+            )],
+        );
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[open_pr(11, "sha-11", false, "alice")]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                (
+                    "MOCK_ORACLE_LOG".into(),
+                    oracle_log.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_ORACLE_OUTPUT".into(), "fresh oracle review".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let oracle_log_contents = fs::read_to_string(&oracle_log).expect("oracle should run");
+        assert!(
+            !oracle_log_contents.is_empty(),
+            "embedded marker comment must not suppress oracle"
+        );
+
+        let comments = read_comment_log(&comments_file);
+        assert_eq!(comments.len(), 2, "a new comment should be posted");
+        assert!(
+            comments
+                .iter()
+                .filter_map(|comment| comment["body"].as_str())
+                .any(
+                    |body| body.starts_with("<!-- ralph:oracle-review:11:sha-11 -->\n")
+                        && body.contains("fresh oracle review")
+                ),
+            "expected a fresh oracle review comment, got:\n{comments:#?}"
+        );
+
+        let state = load_oracle_state(&dh).expect("state should be updated");
         assert_eq!(state.reviewed.get("11"), Some(&"sha-11".to_owned()));
     })
 }
@@ -1519,7 +1592,7 @@ fn write_comment_log(path: &Path, comments: &[String]) {
     if comments.is_empty() {
         fs::write(path, "").expect("write empty comments");
     } else {
-        fs::write(path, comments.join("\n")).expect("write comments");
+        fs::write(path, format!("{}\n", comments.join("\n"))).expect("write comments");
     }
 }
 

@@ -157,7 +157,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         let marker = oracle_review_marker(pr.number, &pr.head_sha);
-        match github::find_bot_comment_with_marker_with_gh_bin(
+        match github::find_bot_comment_with_marker_exact_with_gh_bin(
             &config.gh_bin,
             &config.owner,
             &config.repo,

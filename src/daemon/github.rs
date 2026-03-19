@@ -2137,9 +2137,25 @@ pub async fn find_bot_comment_with_marker_with_gh_bin(
     bot_login: &str,
 ) -> Result<Option<IssueComment>> {
     let comments = fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number).await?;
-    Ok(comments
-        .into_iter()
-        .find(|c| c.author_login == bot_login && c.body.contains(marker)))
+    Ok(find_bot_comment_with_marker_in_comments(
+        comments, marker, bot_login,
+    ))
+}
+
+/// Bot-scoped lookup: only matches comments where `author_login == bot_login`
+/// AND the body starts with the marker line exactly or equals the marker.
+pub async fn find_bot_comment_with_marker_exact_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    let comments = fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number).await?;
+    Ok(find_bot_comment_with_marker_exact_in_comments(
+        comments, marker, bot_login,
+    ))
 }
 
 /// Post a comment on an issue with a marker prefix, using bot-scoped idempotency.
@@ -2179,7 +2195,7 @@ pub async fn post_bot_comment_with_marker_outcome_with_gh_bin(
     body_text: &str,
     bot_login: &str,
 ) -> PostCommentOutcome {
-    let existing = match find_bot_comment_with_marker_with_gh_bin(
+    let existing = match find_bot_comment_with_marker_exact_with_gh_bin(
         gh_bin,
         owner,
         repo,
@@ -2226,7 +2242,7 @@ pub async fn post_bot_comment_with_marker_outcome_with_gh_bin(
         )));
     }
 
-    match find_bot_comment_with_marker_with_gh_bin(
+    match find_bot_comment_with_marker_exact_with_gh_bin(
         gh_bin,
         owner,
         repo,
@@ -2250,6 +2266,30 @@ pub async fn post_bot_comment_with_marker_outcome_with_gh_bin(
     }
 
     PostCommentOutcome::Posted
+}
+
+fn find_bot_comment_with_marker_in_comments(
+    comments: Vec<IssueComment>,
+    marker: &str,
+    bot_login: &str,
+) -> Option<IssueComment> {
+    comments
+        .into_iter()
+        .find(|comment| comment.author_login == bot_login && comment.body.contains(marker))
+}
+
+fn find_bot_comment_with_marker_exact_in_comments(
+    comments: Vec<IssueComment>,
+    marker: &str,
+    bot_login: &str,
+) -> Option<IssueComment> {
+    comments.into_iter().find(|comment| {
+        comment.author_login == bot_login && marker_matches_exact_marker_line(&comment.body, marker)
+    })
+}
+
+fn marker_matches_exact_marker_line(body: &str, marker: &str) -> bool {
+    body == marker || body.starts_with(&format!("{marker}\n"))
 }
 
 pub async fn post_bot_comment_with_marker_with_gh_bin(
@@ -3305,6 +3345,31 @@ mod tests {
         let (prs, overflow) = parse_open_prs(&raw).expect("open PRs should parse");
         assert!(overflow);
         assert_eq!(prs.len(), 100);
+    }
+
+    #[test]
+    fn marker_matches_exact_marker_line_accepts_marker_only_and_first_line() {
+        let marker = "<!-- marker -->";
+
+        assert!(super::marker_matches_exact_marker_line(marker, marker));
+        assert!(super::marker_matches_exact_marker_line(
+            "<!-- marker -->\nreview body",
+            marker
+        ));
+    }
+
+    #[test]
+    fn marker_matches_exact_marker_line_rejects_embedded_marker_text() {
+        let marker = "<!-- marker -->";
+
+        assert!(!super::marker_matches_exact_marker_line(
+            "preamble\n<!-- marker -->\nreview body",
+            marker
+        ));
+        assert!(!super::marker_matches_exact_marker_line(
+            "<!-- marker --> trailing text",
+            marker
+        ));
     }
 
     #[tokio::test]
