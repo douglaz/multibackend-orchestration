@@ -664,6 +664,12 @@ pub async fn poll_pr_reviews(
                 continue;
             }
 
+            // Skip daemon-generated comments (status updates, rebase
+            // notifications, etc.) which all start with an HTML marker.
+            if comment.body.trim_start().starts_with("<!-- ralph:") {
+                continue;
+            }
+
             // Dedup check.
             let key = comment.dedup_key();
             if state.processed_keys.contains(&key) {
@@ -905,12 +911,22 @@ mod tests {
                 line: None,
                 created_at: "2024-01-01T00:00:00Z".to_string(),
             },
+            PrReviewComment {
+                id: 4,
+                endpoint: CommentEndpoint::IssueComment,
+                author: "alice".to_string(),
+                body: "<!-- ralph:rebase:task-1:failed:abc123 -->\nAuto-rebase failed".to_string(),
+                path: None,
+                line: None,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+            },
         ];
 
         let filtered: Vec<_> = comments
             .iter()
             .filter(|c| whitelist.iter().any(|w| w.eq_ignore_ascii_case(&c.author)))
             .filter(|c| !c.body.trim().is_empty())
+            .filter(|c| !c.body.trim_start().starts_with("<!-- ralph:"))
             .collect();
 
         assert_eq!(filtered.len(), 2);
