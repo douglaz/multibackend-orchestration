@@ -573,16 +573,6 @@ pub async fn poll_pr_reviews(
         return Ok(Vec::new());
     }
 
-    // Resolve authenticated login once per poll cycle.
-    let self_login = match github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).await {
-        Ok(login) => login,
-        Err(err) => {
-            return Err(RalphError::Orchestration(format!(
-                "failed to resolve authenticated GitHub login for PR review polling: {err}"
-            )));
-        }
-    };
-
     let tasks = discover_tasks_with_prs(&config.workspace_root, &config.owner, &config.repo);
     if tasks.is_empty() {
         return Ok(Vec::new());
@@ -661,11 +651,6 @@ pub async fn poll_pr_reviews(
         const MAX_CONSECUTIVE_SAVE_FAILURES: u32 = 3;
 
         for comment in &comments {
-            // Skip self-comments (case-insensitive — GitHub logins are case-insensitive).
-            if comment.author.eq_ignore_ascii_case(&self_login) {
-                continue;
-            }
-
             // Skip non-whitelisted users (case-insensitive).
             if !whitelist
                 .iter()
@@ -922,10 +907,8 @@ mod tests {
             },
         ];
 
-        let self_login = "ralph-bot";
         let filtered: Vec<_> = comments
             .iter()
-            .filter(|c| !c.author.eq_ignore_ascii_case(self_login))
             .filter(|c| whitelist.iter().any(|w| w.eq_ignore_ascii_case(&c.author)))
             .filter(|c| !c.body.trim().is_empty())
             .collect();
@@ -933,22 +916,6 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].author, "Alice");
         assert_eq!(filtered[1].author, "BOB");
-    }
-
-    #[test]
-    fn self_comment_filtering() {
-        let self_login = "ralph-bot";
-        let comment = PrReviewComment {
-            id: 1,
-            endpoint: CommentEndpoint::IssueComment,
-            author: "Ralph-Bot".to_string(), // different case
-            body: "automated comment".to_string(),
-            path: None,
-            line: None,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-        };
-
-        assert!(comment.author.eq_ignore_ascii_case(self_login));
     }
 
     #[test]

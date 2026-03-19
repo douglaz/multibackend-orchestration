@@ -161,14 +161,12 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             "content_block_start" | "content_block_stop" | "ping" => {}
 
             // --- Claude CLI --verbose events ---
-            "system" => {
+            "system" if output.session_id.is_none() => {
                 // Init event; extract session_id
-                if output.session_id.is_none() {
-                    output.session_id = event
-                        .get("session_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
+                output.session_id = event
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             "assistant" => {
                 // Response event; text is in message.content[].text
@@ -188,13 +186,11 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 }
                 merge_usage_from_event(&event, &mut output);
             }
-            "init" => {
-                if output.session_id.is_none() {
-                    output.session_id = event
-                        .get("session_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
+            "init" if output.session_id.is_none() => {
+                output.session_id = event
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             "message" => {
                 // Goose CLI wraps messages in {"type":"message","message":{...}}.
@@ -282,13 +278,11 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             }
 
             // --- Codex CLI events ---
-            "thread.started" => {
-                if output.session_id.is_none() {
-                    output.session_id = event
-                        .get("thread_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
+            "thread.started" if output.session_id.is_none() => {
+                output.session_id = event
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             "item.completed" => {
                 // Only extract text from agent_message items, not reasoning items.
@@ -326,13 +320,11 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             }
 
             // --- OpenCode CLI events ---
-            "step_start" => {
-                if output.session_id.is_none() {
-                    output.session_id = event
-                        .get("sessionID")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
+            "step_start" if output.session_id.is_none() => {
+                output.session_id = event
+                    .get("sessionID")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             "text" => {
                 if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
