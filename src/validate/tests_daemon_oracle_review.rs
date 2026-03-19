@@ -2,7 +2,6 @@ use super::*;
 
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -825,7 +824,8 @@ fn missing_oracle_binary_does_not_advance_state(h: &RalphHarness) -> TestResult 
 
         let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
         let comments_file = path_in_temp(&dh, "comments.jsonl");
-        let path_env = isolated_script_path_env(&gh_path);
+        let missing_oracle = write_missing_oracle_path(&dh).expect("missing oracle path");
+        let path_env = isolated_script_path_env(&missing_oracle);
         let git_bin = system_git_bin();
 
         let output = run_daemon_once(
@@ -866,10 +866,8 @@ fn oracle_spawn_failure_isolated(h: &RalphHarness) -> TestResult {
         let comments_file = path_in_temp(&dh, "comments.jsonl");
         let oracle_dir = path_in_temp(&dh, "oracle-bin");
         fs::create_dir_all(&oracle_dir).expect("mkdir oracle dir");
-        let deferred_target = oracle_dir.join("oracle-real");
-        symlink(&deferred_target, oracle_dir.join("oracle"))
-            .expect("create deferred oracle symlink");
-        let path_env = isolated_script_path_env(&oracle_dir.join("oracle"));
+        let deferred_target = oracle_dir.join("oracle");
+        let path_env = isolated_script_path_env(&deferred_target);
         let git_bin = system_git_bin();
 
         let output = run_daemon_once(
@@ -1026,8 +1024,8 @@ fn run_daemon_once(
     mut env_vars: Vec<(String, String)>,
 ) -> Output {
     let git_wrapper = write_git_wrapper_script(dh, git_bin).expect("mock git wrapper");
-    let wrapper_path_env = script_path_env(&git_wrapper);
-    env_vars.push(("PATH".into(), format!("{wrapper_path_env}:{path_env}")));
+    let git_wrapper_dir = script_dir(&git_wrapper);
+    env_vars.push(("PATH".into(), format!("{git_wrapper_dir}:{path_env}")));
     env_vars.push(("MOCK_GH_ISSUES".into(), "[]".into()));
 
     let env_refs: Vec<(&str, &str)> = env_vars
@@ -1065,21 +1063,30 @@ fn write_bash_wrapper_script(
     name: &str,
     bash_content: &str,
 ) -> crate::Result<PathBuf> {
+    let bash_bin = system_command_bin("bash");
     let inner_name = format!("{name}.inner.bash");
     let inner_path = dh.write_mock_script(&inner_name, bash_content)?;
     let inner_for_wrapper = inner_path
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    let wrapper = format!("#!/bin/sh\nexec bash \"{inner_for_wrapper}\" \"$@\"\n");
+    let bash_for_wrapper = bash_bin.replace('\\', "\\\\").replace('"', "\\\"");
+    let wrapper =
+        format!("#!/bin/sh\nexec \"{bash_for_wrapper}\" \"{inner_for_wrapper}\" \"$@\"\n");
     dh.write_mock_script(name, &wrapper)
 }
 
+fn write_missing_oracle_path(dh: &RalphHarness) -> crate::Result<PathBuf> {
+    let oracle_dir = path_in_temp(dh, "missing-oracle-bin");
+    fs::create_dir_all(&oracle_dir)?;
+    Ok(oracle_dir.join("oracle"))
+}
+
 fn write_oracle_review_mock_gh(dh: &RalphHarness) -> crate::Result<PathBuf> {
-    write_bash_wrapper_script(
-        dh,
-        "gh",
-        r#"set -euo pipefail
+    let chmod_bin = system_command_bin("chmod")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let script = r#"set -euo pipefail
 
 json_escape() {
   local value="${1-}"
@@ -1203,30 +1210,30 @@ case "${1:-}" in
         if [[ -n "${MOCK_GH_CREATE_ORACLE_ON_DIFF_PR:-}" && "${MOCK_GH_CREATE_ORACLE_ON_DIFF_PR:-}" == "$pr_number" ]]; then
           target="${MOCK_GH_CREATE_ORACLE_TARGET:-}"
           if [[ -n "$target" && ! -e "$target" ]]; then
-            cat > "$target" <<'EOF'
-#!/bin/sh
-set -eu
-
-prompt=""
-write_output=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--prompt" ]; then
-    prompt="$arg"
-  fi
-  if [ "$prev" = "--write-output" ]; then
-    write_output="$arg"
-  fi
-  prev="$arg"
-done
-
-output="${MOCK_ORACLE_OUTPUT:-Oracle review body}"
-if [ -n "$write_output" ]; then
-  printf '%s' "$output" > "$write_output"
-fi
-printf '%s' "$output"
-EOF
-            chmod +x "$target"
+            printf '%s\n' \
+              '#!/bin/sh' \
+              'set -eu' \
+              '' \
+              'prompt=""' \
+              'write_output=""' \
+              'prev=""' \
+              'for arg in "$@"; do' \
+              '  if [ "$prev" = "--prompt" ]; then' \
+              '    prompt="$arg"' \
+              '  fi' \
+              '  if [ "$prev" = "--write-output" ]; then' \
+              '    write_output="$arg"' \
+              '  fi' \
+              '  prev="$arg"' \
+              'done' \
+              '' \
+              'output="${MOCK_ORACLE_OUTPUT:-Oracle review body}"' \
+              'if [ -n "$write_output" ]; then' \
+              '  printf '\''%s'\'' "$output" > "$write_output"' \
+              'fi' \
+              'printf '\''%s'\'' "$output"' \
+              > "$target"
+            "__CHMOD_BIN__" +x "$target"
           fi
         fi
         printf 'diff for pr %s\n%s' "$pr_number" "${MOCK_GH_DIFF_TEXT:-}"
@@ -1266,8 +1273,9 @@ esac
 
 echo "unexpected gh invocation: $*" >&2
 exit 1
-"#,
-    )
+"#;
+    let script = script.replace("__CHMOD_BIN__", &chmod_bin);
+    write_bash_wrapper_script(dh, "gh", &script)
 }
 
 fn write_oracle_mock(dh: &RalphHarness) -> crate::Result<PathBuf> {
@@ -1332,35 +1340,39 @@ esac
     )
 }
 
-fn system_git_bin() -> String {
+fn system_command_bin(command: &str) -> String {
     let output = Command::new("sh")
-        .args(["-c", "command -v git"])
+        .args(["-c", &format!("command -v {command}")])
         .output()
-        .expect("resolve git path");
+        .unwrap_or_else(|err| panic!("resolve {command} path: {err}"));
     assert!(
         output.status.success(),
-        "command -v git failed: {}",
+        "command -v {command} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-fn script_path_env(script_path: &Path) -> String {
-    let script_dir = script_path
-        .parent()
-        .expect("script should have parent")
-        .to_string_lossy()
-        .into_owned();
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    format!("{script_dir}:{current_path}")
+fn system_git_bin() -> String {
+    system_command_bin("git")
 }
 
-fn isolated_script_path_env(script_path: &Path) -> String {
+fn script_dir(script_path: &Path) -> String {
     script_path
         .parent()
         .expect("script should have parent")
         .to_string_lossy()
         .into_owned()
+}
+
+fn script_path_env(script_path: &Path) -> String {
+    let script_dir = script_dir(script_path);
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    format!("{script_dir}:{current_path}")
+}
+
+fn isolated_script_path_env(script_path: &Path) -> String {
+    script_dir(script_path)
 }
 
 fn open_pr(number: u32, head_sha: &str, is_draft: bool, author: &str) -> String {
