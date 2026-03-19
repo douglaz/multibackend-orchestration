@@ -146,16 +146,18 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         }
     };
 
-    let bot_login =
-        match github::fetch_authenticated_login_with_gh_bin_with_timeout(&config.gh_bin, gh_timeout)
-            .await
-        {
-            Ok(login) => login,
-            Err(err) => {
-                eprintln!("warning: oracle review: bot login resolve failed: {err}");
-                return Ok(());
-            }
-        };
+    let bot_login = match github::fetch_authenticated_login_with_gh_bin_with_timeout(
+        &config.gh_bin,
+        gh_timeout,
+    )
+    .await
+    {
+        Ok(login) => login,
+        Err(err) => {
+            eprintln!("warning: oracle review: bot login resolve failed: {err}");
+            return Ok(());
+        }
+    };
 
     let mut success_count = 0u32;
     for pr in candidates {

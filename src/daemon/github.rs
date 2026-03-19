@@ -2660,6 +2660,7 @@ pub async fn find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
 /// Preserves post-vs-readback outcome separation: if `gh issue comment`
 /// succeeds but the follow-up readback times out, the helper still reports
 /// `Posted` so that the caller can advance state.
+#[allow(clippy::too_many_arguments)]
 pub async fn post_bot_comment_with_marker_outcome_with_gh_bin_with_timeout(
     gh_bin: &str,
     owner: &str,

@@ -1232,8 +1232,7 @@ fn gh_pr_list_timeout_leaves_state_unchanged(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         let combined = combined_output(&output);
         assert!(
-            combined.contains("oracle review")
-                && combined.contains("PR list failed"),
+            combined.contains("oracle review") && combined.contains("PR list failed"),
             "hung pr list should produce oracle review warning, got:\n{combined}"
         );
         assert!(
@@ -1279,8 +1278,7 @@ fn gh_bot_login_timeout_leaves_state_unchanged(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         let combined = combined_output(&output);
         assert!(
-            combined.contains("oracle review")
-                && combined.contains("bot login resolve failed"),
+            combined.contains("oracle review") && combined.contains("bot login resolve failed"),
             "hung bot login should produce oracle review warning, got:\n{combined}"
         );
         assert!(
