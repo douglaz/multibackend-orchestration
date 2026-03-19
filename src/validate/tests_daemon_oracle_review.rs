@@ -387,11 +387,14 @@ fn eligible_pr_reviewed(h: &RalphHarness) -> TestResult {
         );
 
         let oracle_log_contents = fs::read_to_string(&oracle_log).expect("oracle log");
-        assert!(
-            oracle_log_contents.contains(
-                "prompt=You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits."
-            ),
-            "oracle prompt should match spec exactly, got:\n{oracle_log_contents}"
+        let prompt = oracle_log_contents
+            .lines()
+            .find_map(|line| line.strip_prefix("prompt="))
+            .expect("oracle log should include prompt");
+        assert_eq!(
+            prompt,
+            "You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits.",
+            "oracle prompt should match spec exactly"
         );
         let diff_path = oracle_log_contents
             .lines()
