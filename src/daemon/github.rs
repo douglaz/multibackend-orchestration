@@ -1909,6 +1909,15 @@ pub struct IssueComment {
     pub created_at: DateTime<Utc>,
 }
 
+/// Distinguishes whether a marker-based comment post was skipped, posted, or
+/// failed before GitHub accepted the comment.
+#[derive(Debug)]
+pub enum PostCommentOutcome {
+    AlreadyExists(IssueComment),
+    Posted,
+    PostFailed(RalphError),
+}
+
 /// Fetch all comments on an issue as structured data.
 ///
 /// Returns a list of [`IssueComment`] in chronological order.
@@ -2156,6 +2165,91 @@ pub async fn post_bot_comment_with_marker(
         bot_login,
     )
     .await
+}
+
+/// Post a comment on an issue with a marker prefix, using bot-scoped
+/// idempotency, while distinguishing a true post failure from a metadata
+/// readback failure after a successful `gh issue comment`.
+pub async fn post_bot_comment_with_marker_outcome_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> PostCommentOutcome {
+    let existing = match find_bot_comment_with_marker_with_gh_bin(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )
+    .await
+    {
+        Ok(existing) => existing,
+        Err(err) => return PostCommentOutcome::PostFailed(err),
+    };
+    if let Some(existing) = existing {
+        return PostCommentOutcome::AlreadyExists(existing);
+    }
+
+    let full_body = format!("{marker}\n{body_text}");
+    let full_repo = format!("{owner}/{repo}");
+    let output = match Command::new(gh_bin)
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            &full_body,
+        ])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return PostCommentOutcome::PostFailed(RalphError::Orchestration(format!(
+                "failed to post bot marker comment on {full_repo}#{issue_number}: {err}"
+            )))
+        }
+    };
+
+    if !output.status.success() {
+        return PostCommentOutcome::PostFailed(RalphError::Orchestration(format!(
+            "gh issue comment (bot-scoped) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    match find_bot_comment_with_marker_with_gh_bin(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!(
+                "warning: github: bot marker comment readback missing after successful post for {full_repo}#{issue_number}"
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: github: bot marker comment readback failed after successful post for {full_repo}#{issue_number}: {err}"
+            );
+        }
+    }
+
+    PostCommentOutcome::Posted
 }
 
 pub async fn post_bot_comment_with_marker_with_gh_bin(
@@ -2725,8 +2819,10 @@ mod tests {
 
     use super::{
         has_diff, is_invalid_revision_error, is_retryable_push_error, parse_issue_list,
-        parse_open_prs, parse_pr_is_draft, parse_pr_merge_info, push_branch_with_retry_impl,
-        GhIssue, PrMergeStatus, REQUIRED_LABELS,
+        parse_open_prs, parse_pr_is_draft, parse_pr_merge_info,
+        post_bot_comment_with_marker_metadata_with_gh_bin,
+        post_bot_comment_with_marker_outcome_with_gh_bin, push_branch_with_retry_impl, GhIssue,
+        PostCommentOutcome, PrMergeStatus, REQUIRED_LABELS,
     };
     use crate::error::RalphError;
 
@@ -3211,6 +3307,45 @@ mod tests {
         assert_eq!(prs.len(), 100);
     }
 
+    #[tokio::test]
+    async fn post_bot_comment_outcome_treats_readback_failure_after_post_as_success() {
+        let temp = tempdir().expect("tempdir");
+        let gh_bin = write_mock_gh_comment_binary(temp.path());
+
+        let outcome = post_bot_comment_with_marker_outcome_with_gh_bin(
+            &gh_bin,
+            "acme",
+            "widgets",
+            11,
+            "<!-- marker -->",
+            "body",
+            "ralph-bot",
+        )
+        .await;
+
+        assert!(matches!(outcome, PostCommentOutcome::Posted));
+    }
+
+    #[tokio::test]
+    async fn post_bot_comment_metadata_still_errors_on_readback_failure() {
+        let temp = tempdir().expect("tempdir");
+        let gh_bin = write_mock_gh_comment_binary(temp.path());
+
+        let err = post_bot_comment_with_marker_metadata_with_gh_bin(
+            &gh_bin,
+            "acme",
+            "widgets",
+            11,
+            "<!-- marker -->",
+            "body",
+            "ralph-bot",
+        )
+        .await
+        .expect_err("metadata helper should preserve readback failure semantics");
+
+        assert!(err.to_string().contains("mock comment readback failure"));
+    }
+
     #[test]
     fn required_labels_are_unique_and_include_lifecycle_labels() {
         let names: Vec<&str> = REQUIRED_LABELS.iter().map(|(name, _, _)| *name).collect();
@@ -3487,6 +3622,53 @@ exit 0
     fn read_attempts(path: &Path) -> u32 {
         let raw = fs::read_to_string(path).expect("read attempts file");
         raw.trim().parse::<u32>().expect("parse attempts")
+    }
+
+    fn write_mock_gh_comment_binary(dir: &Path) -> String {
+        let script_path = dir.join("mock-gh-comment.sh");
+        let readback_flag = dir
+            .join("readback.flag")
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+
+readback_flag="{readback_flag}"
+
+case "${{1:-}}" in
+  issue)
+    case "${{2:-}}" in
+      view)
+        if [ -f "$readback_flag" ]; then
+          rm -f "$readback_flag"
+          echo "mock comment readback failure" >&2
+          exit 1
+        fi
+        printf '{{"comments":[]}}'
+        exit 0
+        ;;
+      comment)
+        : > "$readback_flag"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+echo "unexpected gh invocation: $*" >&2
+exit 1
+"#
+        );
+        fs::write(&script_path, script).expect("write mock gh script");
+        let mut perms = fs::metadata(&script_path)
+            .expect("mock gh metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("set mock gh permissions");
+        script_path.display().to_string()
     }
 
     // --- PR review comment tests ---

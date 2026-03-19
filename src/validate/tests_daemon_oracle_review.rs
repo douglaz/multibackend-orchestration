@@ -91,6 +91,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: comment_post_failure_does_not_advance_state,
         },
         ConformanceTest {
+            name: "daemon_oracle_review::comment_readback_failure_still_advances_state",
+            func: comment_readback_failure_still_advances_state,
+        },
+        ConformanceTest {
             name: "daemon_oracle_review::overflow_warning_logged",
             func: overflow_warning_logged,
         },
@@ -961,6 +965,97 @@ fn comment_post_failure_does_not_advance_state(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn comment_readback_failure_still_advances_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_max_per_cycle",
+            "2",
+            "--global",
+        ])
+        .expect("set cap");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let readback_flag = path_in_temp(&dh, "comment-readback.flag");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[
+                        open_pr(11, "sha-11", false, "alice"),
+                        open_pr(12, "sha-12", false, "alice"),
+                        open_pr(13, "sha-13", false, "alice"),
+                    ]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_GH_FAIL_COMMENT_READBACK_PR".into(), "11".into()),
+                (
+                    "MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE".into(),
+                    readback_flag.to_string_lossy().into_owned(),
+                ),
+                (
+                    "MOCK_ORACLE_OUTPUT".into(),
+                    "readback failure recovery".into(),
+                ),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let state = load_oracle_state(&dh).expect("state");
+        assert_eq!(state.reviewed.get("11"), Some(&"sha-11".to_owned()));
+        assert_eq!(state.reviewed.get("12"), Some(&"sha-12".to_owned()));
+        assert!(
+            !state.reviewed.contains_key("13"),
+            "posted PRs should count toward the per-cycle cap"
+        );
+
+        let comments = read_comment_log(&comments_file);
+        assert_eq!(
+            comments.len(),
+            2,
+            "readback failure after a successful post should still consume the cap"
+        );
+        let bodies: Vec<&str> = comments
+            .iter()
+            .map(|comment| comment["body"].as_str().expect("comment body"))
+            .collect();
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.starts_with("<!-- ralph:oracle-review:11:sha-11 -->\n")),
+            "the successfully posted comment must still be present"
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.starts_with("<!-- ralph:oracle-review:12:sha-12 -->\n")),
+            "subsequent eligible PRs should still be processed"
+        );
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !body.starts_with("<!-- ralph:oracle-review:13:sha-13 -->\n")),
+            "the third PR should be skipped once the cap is reached"
+        );
+    })
+}
+
 fn overflow_warning_logged(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = new_daemon_harness(h);
@@ -1153,6 +1248,7 @@ case "${1:-}" in
         exit 0
         ;;
       view)
+        issue_number="${3:-0}"
         want_comments=0
         want_labels=0
         want_title_body=0
@@ -1162,6 +1258,13 @@ case "${1:-}" in
           [[ "$arg" == "title,body" ]] && want_title_body=1
         done
         if [[ $want_comments -eq 1 ]]; then
+          if [[ "${MOCK_GH_FAIL_COMMENT_READBACK_PR:-}" == "$issue_number" \
+             && -n "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" \
+             && -e "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" ]]; then
+            rm -f "$MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE"
+            echo "mock comment readback failure" >&2
+            exit 1
+          fi
           emit_comments
           exit 0
         fi
@@ -1191,6 +1294,10 @@ case "${1:-}" in
           exit 1
         fi
         append_comment "$issue_number" "$body"
+        if [[ "${MOCK_GH_FAIL_COMMENT_READBACK_PR:-}" == "$issue_number" \
+           && -n "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" ]]; then
+          : > "$MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE"
+        fi
         exit 0
         ;;
       edit)

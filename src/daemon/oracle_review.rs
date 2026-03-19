@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::github::{self, OpenPrInfo};
+use crate::daemon::github::{self, OpenPrInfo, PostCommentOutcome};
 use crate::daemon::process;
 use crate::daemon::runtime::{truncate_for_github, DaemonRuntimeConfig, GITHUB_COMMENT_LIMIT};
 use crate::error::RalphError;
@@ -226,7 +226,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             .saturating_sub(1);
         let truncated_body = truncate_for_github(review_text.trim(), available_body_chars);
 
-        match github::post_bot_comment_with_marker_with_gh_bin(
+        match github::post_bot_comment_with_marker_outcome_with_gh_bin(
             &config.gh_bin,
             &config.owner,
             &config.repo,
@@ -237,7 +237,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         )
         .await
         {
-            Ok(_) => {
+            PostCommentOutcome::Posted => {
                 success_count = success_count.saturating_add(1);
                 state.mark_reviewed(pr.number, &pr.head_sha);
                 if let Err(err) = state.save(&config.workspace_root) {
@@ -247,7 +247,16 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
                     );
                 }
             }
-            Err(err) => {
+            PostCommentOutcome::AlreadyExists(_) => {
+                state.mark_reviewed(pr.number, &pr.head_sha);
+                if let Err(err) = state.save(&config.workspace_root) {
+                    eprintln!(
+                        "warning: oracle review: PR #{} state save failed: {err}",
+                        pr.number
+                    );
+                }
+            }
+            PostCommentOutcome::PostFailed(err) => {
                 eprintln!(
                     "warning: oracle review: PR #{} comment post failed: {err}",
                     pr.number
