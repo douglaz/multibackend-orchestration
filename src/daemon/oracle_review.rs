@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,6 +13,53 @@ use crate::error::RalphError;
 use crate::Result;
 
 const ORACLE_SYSTEM_PROMPT: &str = "You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits.";
+const ORACLE_USER_PROMPT: &str = "Review the attached PR diff.";
+const ORACLE_SYSTEM_WRAPPER: &str = r#"import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+const cliPath = process.env.RALPH_ORACLE_CLI_PATH;
+if (!cliPath) {
+  console.error('oracle spawn: missing RALPH_ORACLE_CLI_PATH');
+  process.exit(70);
+}
+
+const cliUrl = pathToFileURL(cliPath);
+const require = createRequire(cliUrl);
+
+let commander;
+try {
+  commander = require('commander');
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`oracle spawn: failed to load commander: ${message}`);
+  process.exit(70);
+}
+
+const { Command, Option } = commander;
+const originalOption = Command.prototype.option;
+
+Command.prototype.option = function patchedOption(flags, description, ...args) {
+  const result = originalOption.call(this, flags, description, ...args);
+  if (
+    flags === '-p, --prompt <text>' &&
+    !this.options.some((option) => option.long === '--system')
+  ) {
+    result.addOption(
+      new Option('--system <text>', 'System prompt to send to the model.').hideHelp(),
+    );
+  }
+  return result;
+};
+
+try {
+  await import(cliUrl.href);
+} catch (error) {
+  const message =
+    error instanceof Error ? error.stack ?? error.message : String(error);
+  console.error(`oracle spawn: failed to launch oracle cli: ${message}`);
+  process.exit(70);
+}
+"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OracleReviewState {
@@ -258,7 +306,19 @@ fn oracle_review_marker(pr_number: u32, head_sha: &str) -> String {
     format!("<!-- ralph:oracle-review:{pr_number}:{head_sha} -->")
 }
 
-fn diff_temp_path(workspace_root: &Path, pr_number: u32, head_sha: &str) -> PathBuf {
+fn diff_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
+    oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.diff"))
+}
+
+fn oracle_output_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
+    oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.out"))
+}
+
+fn oracle_wrapper_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
+    oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.mjs"))
+}
+
+fn temp_file_stem(pr_number: u32, head_sha: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -267,8 +327,33 @@ fn diff_temp_path(workspace_root: &Path, pr_number: u32, head_sha: &str) -> Path
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
-    oracle_review_state_dir(workspace_root)
-        .join(format!("pr-{pr_number}-{sanitized_sha}-{now}.diff"))
+    format!("pr-{pr_number}-{sanitized_sha}-{now}")
+}
+
+fn resolve_executable_in_path(binary: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| fs::canonicalize(&candidate).unwrap_or(candidate))
+}
+
+fn resolve_oracle_cli_entrypoint() -> Option<PathBuf> {
+    let oracle_path = resolve_executable_in_path("oracle")?;
+    let bin_dir = oracle_path.parent()?;
+    let dist_dir = bin_dir.parent()?;
+
+    if oracle_path.file_name()?.to_str()? != "oracle-cli.js" {
+        return None;
+    }
+    if bin_dir.file_name()?.to_str()? != "bin" {
+        return None;
+    }
+    if dist_dir.file_name()?.to_str()? != "dist" {
+        return None;
+    }
+
+    Some(oracle_path)
 }
 
 async fn invoke_oracle(
@@ -290,7 +375,10 @@ async fn invoke_oracle(
             ))
         })?;
 
-        let diff_path = diff_temp_path(&workspace_root, pr_number, &head_sha);
+        let temp_stem = temp_file_stem(pr_number, &head_sha);
+        let diff_path = diff_temp_path(&workspace_root, &temp_stem);
+        let output_path = oracle_output_temp_path(&workspace_root, &temp_stem);
+        let wrapper_path = oracle_wrapper_temp_path(&workspace_root, &temp_stem);
         fs::write(&diff_path, diff).map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to write oracle review diff temp file {}: {err}",
@@ -299,12 +387,32 @@ async fn invoke_oracle(
         })?;
 
         let result = (|| -> Result<String> {
-            let mut command = std::process::Command::new("oracle");
+            let oracle_cli_entrypoint = resolve_oracle_cli_entrypoint();
+            let mut command = if let Some(cli_entrypoint) = oracle_cli_entrypoint {
+                fs::write(&wrapper_path, ORACLE_SYSTEM_WRAPPER).map_err(|err| {
+                    RalphError::Orchestration(format!(
+                        "failed to write oracle wrapper {}: {err}",
+                        wrapper_path.display()
+                    ))
+                })?;
+
+                let mut command = std::process::Command::new("node");
+                command
+                    .arg(&wrapper_path)
+                    .env("RALPH_ORACLE_CLI_PATH", cli_entrypoint);
+                command
+            } else {
+                std::process::Command::new("oracle")
+            };
             command
-                .arg("--prompt")
+                .arg("--system")
                 .arg(ORACLE_SYSTEM_PROMPT)
+                .arg("--prompt")
+                .arg(ORACLE_USER_PROMPT)
                 .arg("--file")
-                .arg(&diff_path);
+                .arg(&diff_path)
+                .arg("--write-output")
+                .arg(&output_path);
 
             let output =
                 process::run_command_with_timeout(&mut command, Duration::from_secs(timeout_secs))?;
@@ -316,10 +424,21 @@ async fn invoke_oracle(
                 )));
             }
 
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            match fs::read_to_string(&output_path) {
+                Ok(review_text) => Ok(review_text.trim().to_owned()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                }
+                Err(err) => Err(RalphError::Orchestration(format!(
+                    "failed to read oracle output temp file {}: {err}",
+                    output_path.display()
+                ))),
+            }
         })();
 
         let _ = fs::remove_file(&diff_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&wrapper_path);
         result
     })
     .await
@@ -332,7 +451,7 @@ fn classify_oracle_error(err: &RalphError) -> &'static str {
     let message = err.to_string();
     if message.contains("command timed out") {
         "oracle timeout"
-    } else if message.contains("failed to spawn command") {
+    } else if message.contains("failed to spawn command") || message.contains("oracle spawn:") {
         "oracle spawn"
     } else if message.contains("oracle exited with status") {
         "oracle exit"

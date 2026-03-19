@@ -83,6 +83,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: missing_oracle_binary_does_not_advance_state,
         },
         ConformanceTest {
+            name: "daemon_oracle_review::oracle_spawn_failure_isolated",
+            func: oracle_spawn_failure_isolated,
+        },
+        ConformanceTest {
             name: "daemon_oracle_review::comment_post_failure_does_not_advance_state",
             func: comment_post_failure_does_not_advance_state,
         },
@@ -384,8 +388,8 @@ fn eligible_pr_reviewed(h: &RalphHarness) -> TestResult {
 
         let oracle_log_contents = fs::read_to_string(&oracle_log).expect("oracle log");
         assert!(
-            oracle_log_contents.contains("prompt=You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits."),
-            "oracle prompt should match spec, got:\n{oracle_log_contents}"
+            oracle_log_contents.contains("system=You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits."),
+            "oracle system prompt should match spec, got:\n{oracle_log_contents}"
         );
         let diff_path = oracle_log_contents
             .lines()
@@ -818,7 +822,7 @@ fn missing_oracle_binary_does_not_advance_state(h: &RalphHarness) -> TestResult 
 
         let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
         let comments_file = path_in_temp(&dh, "comments.jsonl");
-        let path_env = script_path_env(&gh_path);
+        let path_env = isolated_script_path_env(&gh_path);
         let git_bin = system_git_bin();
 
         let output = run_daemon_once(
@@ -846,6 +850,62 @@ fn missing_oracle_binary_does_not_advance_state(h: &RalphHarness) -> TestResult 
         );
         assert!(read_comment_log(&comments_file).is_empty());
         assert!(load_oracle_state(&dh).is_none());
+    })
+}
+
+fn oracle_spawn_failure_isolated(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let fail_first_state = path_in_temp(&dh, "oracle-spawn-first.marker");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[
+                        open_pr(11, "sha-11", false, "alice"),
+                        open_pr(12, "sha-12", false, "alice"),
+                    ]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_ORACLE_FAIL_FIRST_MODE".into(), "spawn".into()),
+                (
+                    "MOCK_ORACLE_FAIL_FIRST_STATE_FILE".into(),
+                    fail_first_state.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_ORACLE_OUTPUT".into(), "second review succeeds".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("PR #11 oracle spawn"),
+            "first PR spawn failure should be logged, got:\n{combined}"
+        );
+        let comments = read_comment_log(&comments_file);
+        assert_eq!(comments.len(), 1, "second PR should still be processed");
+        let state = load_oracle_state(&dh).expect("state");
+        assert!(
+            !state.reviewed.contains_key("11"),
+            "spawn-failed PR should not advance state"
+        );
+        assert_eq!(state.reviewed.get("12"), Some(&"sha-12".to_owned()));
     })
 }
 
@@ -1178,20 +1238,29 @@ fn write_oracle_mock(dh: &RalphHarness) -> crate::Result<PathBuf> {
         r#"set -euo pipefail
 
 prompt=""
+system=""
 file=""
+write_output=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "--prompt" ]]; then
     prompt="$arg"
   fi
+  if [[ "$prev" == "--system" ]]; then
+    system="$arg"
+  fi
   if [[ "$prev" == "--file" ]]; then
     file="$arg"
+  fi
+  if [[ "$prev" == "--write-output" ]]; then
+    write_output="$arg"
   fi
   prev="$arg"
 done
 
 if [[ -n "${MOCK_ORACLE_LOG:-}" ]]; then
-  printf 'prompt=%s\nfile=%s\n' "$prompt" "$file" >> "$MOCK_ORACLE_LOG"
+  printf 'system=%s\nprompt=%s\nfile=%s\nwrite_output=%s\n' \
+    "$system" "$prompt" "$file" "$write_output" >> "$MOCK_ORACLE_LOG"
 fi
 
 mode="${MOCK_ORACLE_MODE:-success}"
@@ -1205,10 +1274,18 @@ fi
 
 case "$mode" in
   success)
-    printf '%s' "${MOCK_ORACLE_OUTPUT:-Oracle review body}"
+    output="${MOCK_ORACLE_OUTPUT:-Oracle review body}"
+    if [[ -n "$write_output" ]]; then
+      printf '%s' "$output" > "$write_output"
+    fi
+    printf '%s' "$output"
     ;;
   exit)
     echo "mock oracle exit" >&2
+    exit 7
+    ;;
+  spawn)
+    echo "oracle spawn: mock spawn failure" >&2
     exit 7
     ;;
   timeout)
@@ -1244,6 +1321,14 @@ fn script_path_env(script_path: &Path) -> String {
         .into_owned();
     let current_path = std::env::var("PATH").unwrap_or_default();
     format!("{script_dir}:{current_path}")
+}
+
+fn isolated_script_path_env(script_path: &Path) -> String {
+    script_path
+        .parent()
+        .expect("script should have parent")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn open_pr(number: u32, head_sha: &str, is_draft: bool, author: &str) -> String {
