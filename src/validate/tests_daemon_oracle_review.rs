@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -388,8 +389,10 @@ fn eligible_pr_reviewed(h: &RalphHarness) -> TestResult {
 
         let oracle_log_contents = fs::read_to_string(&oracle_log).expect("oracle log");
         assert!(
-            oracle_log_contents.contains("system=You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits."),
-            "oracle system prompt should match spec, got:\n{oracle_log_contents}"
+            oracle_log_contents.contains(
+                "prompt=You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits.\\n\\nReview the attached PR diff."
+            ),
+            "oracle combined prompt should match spec, got:\n{oracle_log_contents}"
         );
         let diff_path = oracle_log_contents
             .lines()
@@ -860,10 +863,13 @@ fn oracle_spawn_failure_isolated(h: &RalphHarness) -> TestResult {
         enable_oracle_review(&dh);
 
         let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
-        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
         let comments_file = path_in_temp(&dh, "comments.jsonl");
-        let fail_first_state = path_in_temp(&dh, "oracle-spawn-first.marker");
-        let path_env = script_path_env(&oracle_path);
+        let oracle_dir = path_in_temp(&dh, "oracle-bin");
+        fs::create_dir_all(&oracle_dir).expect("mkdir oracle dir");
+        let deferred_target = oracle_dir.join("oracle-real");
+        symlink(&deferred_target, oracle_dir.join("oracle"))
+            .expect("create deferred oracle symlink");
+        let path_env = isolated_script_path_env(&oracle_dir.join("oracle"));
         let git_bin = system_git_bin();
 
         let output = run_daemon_once(
@@ -883,10 +889,10 @@ fn oracle_spawn_failure_isolated(h: &RalphHarness) -> TestResult {
                     "MOCK_GH_COMMENTS_FILE".into(),
                     comments_file.to_string_lossy().into_owned(),
                 ),
-                ("MOCK_ORACLE_FAIL_FIRST_MODE".into(), "spawn".into()),
+                ("MOCK_GH_CREATE_ORACLE_ON_DIFF_PR".into(), "12".into()),
                 (
-                    "MOCK_ORACLE_FAIL_FIRST_STATE_FILE".into(),
-                    fail_first_state.to_string_lossy().into_owned(),
+                    "MOCK_GH_CREATE_ORACLE_TARGET".into(),
+                    deferred_target.to_string_lossy().into_owned(),
                 ),
                 ("MOCK_ORACLE_OUTPUT".into(), "second review succeeds".into()),
             ],
@@ -897,6 +903,10 @@ fn oracle_spawn_failure_isolated(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("PR #11 oracle spawn"),
             "first PR spawn failure should be logged, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("failed to spawn command"),
+            "spawn failure should come from the process helper, got:\n{combined}"
         );
         let comments = read_comment_log(&comments_file);
         assert_eq!(comments.len(), 1, "second PR should still be processed");
@@ -1190,6 +1200,35 @@ case "${1:-}" in
           echo "mock diff failure" >&2
           exit 1
         fi
+        if [[ -n "${MOCK_GH_CREATE_ORACLE_ON_DIFF_PR:-}" && "${MOCK_GH_CREATE_ORACLE_ON_DIFF_PR:-}" == "$pr_number" ]]; then
+          target="${MOCK_GH_CREATE_ORACLE_TARGET:-}"
+          if [[ -n "$target" && ! -e "$target" ]]; then
+            cat > "$target" <<'EOF'
+#!/bin/sh
+set -eu
+
+prompt=""
+write_output=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--prompt" ]; then
+    prompt="$arg"
+  fi
+  if [ "$prev" = "--write-output" ]; then
+    write_output="$arg"
+  fi
+  prev="$arg"
+done
+
+output="${MOCK_ORACLE_OUTPUT:-Oracle review body}"
+if [ -n "$write_output" ]; then
+  printf '%s' "$output" > "$write_output"
+fi
+printf '%s' "$output"
+EOF
+            chmod +x "$target"
+          fi
+        fi
         printf 'diff for pr %s\n%s' "$pr_number" "${MOCK_GH_DIFF_TEXT:-}"
         exit 0
         ;;
@@ -1238,16 +1277,12 @@ fn write_oracle_mock(dh: &RalphHarness) -> crate::Result<PathBuf> {
         r#"set -euo pipefail
 
 prompt=""
-system=""
 file=""
 write_output=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "--prompt" ]]; then
     prompt="$arg"
-  fi
-  if [[ "$prev" == "--system" ]]; then
-    system="$arg"
   fi
   if [[ "$prev" == "--file" ]]; then
     file="$arg"
@@ -1259,8 +1294,9 @@ for arg in "$@"; do
 done
 
 if [[ -n "${MOCK_ORACLE_LOG:-}" ]]; then
-  printf 'system=%s\nprompt=%s\nfile=%s\nwrite_output=%s\n' \
-    "$system" "$prompt" "$file" "$write_output" >> "$MOCK_ORACLE_LOG"
+  escaped_prompt="${prompt//$'\n'/\\n}"
+  printf 'prompt=%s\nfile=%s\nwrite_output=%s\n' \
+    "$escaped_prompt" "$file" "$write_output" >> "$MOCK_ORACLE_LOG"
 fi
 
 mode="${MOCK_ORACLE_MODE:-success}"
@@ -1282,10 +1318,6 @@ case "$mode" in
     ;;
   exit)
     echo "mock oracle exit" >&2
-    exit 7
-    ;;
-  spawn)
-    echo "oracle spawn: mock spawn failure" >&2
     exit 7
     ;;
   timeout)

@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,53 +14,7 @@ use crate::error::RalphError;
 use crate::Result;
 
 const ORACLE_SYSTEM_PROMPT: &str = "You are a senior code reviewer. Review this PR diff for bugs, security issues, performance problems, and code quality. Be concise and actionable. Focus on substantive issues, not style nits.";
-const ORACLE_USER_PROMPT: &str = "Review the attached PR diff.";
-const ORACLE_SYSTEM_WRAPPER: &str = r#"import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
-
-const cliPath = process.env.RALPH_ORACLE_CLI_PATH;
-if (!cliPath) {
-  console.error('oracle spawn: missing RALPH_ORACLE_CLI_PATH');
-  process.exit(70);
-}
-
-const cliUrl = pathToFileURL(cliPath);
-const require = createRequire(cliUrl);
-
-let commander;
-try {
-  commander = require('commander');
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`oracle spawn: failed to load commander: ${message}`);
-  process.exit(70);
-}
-
-const { Command, Option } = commander;
-const originalOption = Command.prototype.option;
-
-Command.prototype.option = function patchedOption(flags, description, ...args) {
-  const result = originalOption.call(this, flags, description, ...args);
-  if (
-    flags === '-p, --prompt <text>' &&
-    !this.options.some((option) => option.long === '--system')
-  ) {
-    result.addOption(
-      new Option('--system <text>', 'System prompt to send to the model.').hideHelp(),
-    );
-  }
-  return result;
-};
-
-try {
-  await import(cliUrl.href);
-} catch (error) {
-  const message =
-    error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(`oracle spawn: failed to launch oracle cli: ${message}`);
-  process.exit(70);
-}
-"#;
+static STATE_SAVE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OracleReviewState {
@@ -102,13 +57,30 @@ impl OracleReviewState {
         let json = serde_json::to_string_pretty(self).map_err(|err| {
             RalphError::Orchestration(format!("failed to serialize oracle review state: {err}"))
         })?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json).map_err(|err| {
+        let tmp_path = unique_state_temp_path(&path);
+        let mut tmp_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to create oracle review state tmp {}: {err}",
+                    tmp_path.display()
+                ))
+            })?;
+        tmp_file.write_all(json.as_bytes()).map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to write oracle review state tmp {}: {err}",
                 tmp_path.display()
             ))
         })?;
+        tmp_file.flush().map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to flush oracle review state tmp {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        drop(tmp_file);
         fs::rename(&tmp_path, &path).map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to rename oracle review state {} -> {}: {err}",
@@ -306,16 +278,32 @@ fn oracle_review_marker(pr_number: u32, head_sha: &str) -> String {
     format!("<!-- ralph:oracle-review:{pr_number}:{head_sha} -->")
 }
 
+fn combined_oracle_prompt() -> String {
+    format!("{ORACLE_SYSTEM_PROMPT}\n\nReview the attached PR diff.")
+}
+
+fn unique_state_temp_path(path: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = STATE_SAVE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let file_name = format!(
+        "{}.tmp.{pid}.{now}.{nonce}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state.json")
+    );
+    path.with_file_name(file_name)
+}
+
 fn diff_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
     oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.diff"))
 }
 
 fn oracle_output_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
     oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.out"))
-}
-
-fn oracle_wrapper_temp_path(workspace_root: &Path, temp_stem: &str) -> PathBuf {
-    oracle_review_state_dir(workspace_root).join(format!("{temp_stem}.mjs"))
 }
 
 fn temp_file_stem(pr_number: u32, head_sha: &str) -> String {
@@ -328,32 +316,6 @@ fn temp_file_stem(pr_number: u32, head_sha: &str) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
     format!("pr-{pr_number}-{sanitized_sha}-{now}")
-}
-
-fn resolve_executable_in_path(binary: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.is_file())
-        .map(|candidate| fs::canonicalize(&candidate).unwrap_or(candidate))
-}
-
-fn resolve_oracle_cli_entrypoint() -> Option<PathBuf> {
-    let oracle_path = resolve_executable_in_path("oracle")?;
-    let bin_dir = oracle_path.parent()?;
-    let dist_dir = bin_dir.parent()?;
-
-    if oracle_path.file_name()?.to_str()? != "oracle-cli.js" {
-        return None;
-    }
-    if bin_dir.file_name()?.to_str()? != "bin" {
-        return None;
-    }
-    if dist_dir.file_name()?.to_str()? != "dist" {
-        return None;
-    }
-
-    Some(oracle_path)
 }
 
 async fn invoke_oracle(
@@ -378,7 +340,6 @@ async fn invoke_oracle(
         let temp_stem = temp_file_stem(pr_number, &head_sha);
         let diff_path = diff_temp_path(&workspace_root, &temp_stem);
         let output_path = oracle_output_temp_path(&workspace_root, &temp_stem);
-        let wrapper_path = oracle_wrapper_temp_path(&workspace_root, &temp_stem);
         fs::write(&diff_path, diff).map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to write oracle review diff temp file {}: {err}",
@@ -387,28 +348,10 @@ async fn invoke_oracle(
         })?;
 
         let result = (|| -> Result<String> {
-            let oracle_cli_entrypoint = resolve_oracle_cli_entrypoint();
-            let mut command = if let Some(cli_entrypoint) = oracle_cli_entrypoint {
-                fs::write(&wrapper_path, ORACLE_SYSTEM_WRAPPER).map_err(|err| {
-                    RalphError::Orchestration(format!(
-                        "failed to write oracle wrapper {}: {err}",
-                        wrapper_path.display()
-                    ))
-                })?;
-
-                let mut command = std::process::Command::new("node");
-                command
-                    .arg(&wrapper_path)
-                    .env("RALPH_ORACLE_CLI_PATH", cli_entrypoint);
-                command
-            } else {
-                std::process::Command::new("oracle")
-            };
+            let mut command = std::process::Command::new("oracle");
             command
-                .arg("--system")
-                .arg(ORACLE_SYSTEM_PROMPT)
                 .arg("--prompt")
-                .arg(ORACLE_USER_PROMPT)
+                .arg(combined_oracle_prompt())
                 .arg("--file")
                 .arg(&diff_path)
                 .arg("--write-output")
@@ -438,7 +381,6 @@ async fn invoke_oracle(
 
         let _ = fs::remove_file(&diff_path);
         let _ = fs::remove_file(&output_path);
-        let _ = fs::remove_file(&wrapper_path);
         result
     })
     .await
@@ -451,7 +393,7 @@ fn classify_oracle_error(err: &RalphError) -> &'static str {
     let message = err.to_string();
     if message.contains("command timed out") {
         "oracle timeout"
-    } else if message.contains("failed to spawn command") || message.contains("oracle spawn:") {
+    } else if message.contains("failed to spawn command") {
         "oracle spawn"
     } else if message.contains("oracle exited with status") {
         "oracle exit"
@@ -462,7 +404,11 @@ fn classify_oracle_error(err: &RalphError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{oracle_review_marker, state_path, OracleReviewState};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::{oracle_review_marker, state_path, unique_state_temp_path, OracleReviewState};
 
     #[test]
     fn oracle_review_state_load_defaults_when_missing() {
@@ -480,6 +426,54 @@ mod tests {
 
         let loaded = OracleReviewState::load(temp.path()).expect("load should succeed");
         assert_eq!(loaded.reviewed.get("17"), Some(&"abc123".to_owned()));
+    }
+
+    #[test]
+    fn oracle_review_state_concurrent_saves_do_not_collide() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().to_path_buf();
+        let mut state = OracleReviewState::default();
+        state.mark_reviewed(17, "abc123");
+        let state = Arc::new(state);
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let workspace_root = workspace_root.clone();
+            let state = Arc::clone(&state);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..16 {
+                    state
+                        .save(&workspace_root)
+                        .expect("concurrent save should succeed");
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread should finish");
+        }
+
+        let loaded = OracleReviewState::load(temp.path()).expect("load should succeed");
+        assert_eq!(loaded.reviewed.get("17"), Some(&"abc123".to_owned()));
+    }
+
+    #[test]
+    fn oracle_review_state_temp_paths_are_unique() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = state_path(temp.path());
+        let paths: Vec<_> = (0..32).map(|_| unique_state_temp_path(&path)).collect();
+        let unique: HashSet<_> = paths.iter().cloned().collect();
+
+        assert_eq!(unique.len(), paths.len(), "temp paths must be unique");
+        assert!(paths.iter().all(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("state.json.tmp."))
+        }));
     }
 
     #[test]
