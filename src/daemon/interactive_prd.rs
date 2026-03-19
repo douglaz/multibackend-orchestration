@@ -759,7 +759,7 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     // Phase 2: deduplicate issues across both passes
     let mut seen = std::collections::HashSet::new();
     let mut deduped_issues: Vec<GhIssue> = Vec::new();
-    for issue in issues.into_iter().chain(active_issues.into_iter()) {
+    for issue in issues.into_iter().chain(active_issues) {
         if seen.insert(issue.number) {
             deduped_issues.push(issue);
         }
