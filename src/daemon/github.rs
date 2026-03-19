@@ -1961,7 +1961,15 @@ pub async fn fetch_issue_comments_with_gh_bin(
         )));
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_issue_comments_output(&output.stdout, &full_repo, issue_number)
+}
+
+fn parse_issue_comments_output(
+    stdout: &[u8],
+    full_repo: &str,
+    issue_number: u32,
+) -> Result<Vec<IssueComment>> {
+    let raw = String::from_utf8_lossy(stdout);
     let raw_trimmed = raw.trim();
     if raw_trimmed.is_empty() {
         return Ok(Vec::new());
@@ -1977,12 +1985,6 @@ pub async fn fetch_issue_comments_with_gh_bin(
         .comments
         .into_iter()
         .filter_map(|raw_comment| {
-            // Prefer numeric ID extracted from the URL field (works with
-            // both GraphQL and REST responses).  The `url` field from
-            // `gh issue view --json comments` looks like:
-            //   https://github.com/…#issuecomment-3954637090
-            // The REST API `url` looks like:
-            //   https://api.github.com/repos/…/comments/3954637090
             let id = extract_numeric_comment_id_from_url(raw_comment.url.as_deref())
                 .or(raw_comment.id)?;
             let author_login = raw_comment
@@ -2499,6 +2501,251 @@ fn parse_authenticated_login(raw: &str) -> Result<String> {
         ));
     }
     Ok(login.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Timeout-bounded `gh` helpers for oracle-review
+// ---------------------------------------------------------------------------
+
+/// Run a `gh` CLI subprocess with a timeout, reusing the same process-group
+/// kill behavior as `process::run_command_with_timeout`.
+pub(crate) async fn run_gh_with_timeout(
+    gh_bin: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    use crate::daemon::process;
+    let gh_bin = gh_bin.to_owned();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new(&gh_bin);
+        cmd.args(&args);
+        process::run_command_with_timeout(&mut cmd, timeout)
+    })
+    .await
+    .map_err(|err| RalphError::Orchestration(format!("gh command join failure: {err}")))?
+}
+
+pub async fn list_open_non_draft_prs_with_timeout(
+    owner: &str,
+    repo: &str,
+    gh_bin: &str,
+    timeout: Duration,
+) -> Result<(Vec<OpenPrInfo>, bool)> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = run_gh_with_timeout(
+        gh_bin,
+        &[
+            "pr",
+            "list",
+            "--repo",
+            &full_repo,
+            "--state",
+            "open",
+            "--json",
+            "number,headRefOid,isDraft,author",
+            "--limit",
+            "100",
+        ],
+        timeout,
+    )
+    .await?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr list failed for {full_repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_open_prs(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+pub async fn fetch_pr_diff_with_timeout(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    gh_bin: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_num_str = pr_number.to_string();
+    let output = run_gh_with_timeout(
+        gh_bin,
+        &["pr", "diff", &pr_num_str, "--repo", &full_repo],
+        timeout,
+    )
+    .await?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr diff failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub async fn fetch_authenticated_login_with_gh_bin_with_timeout(
+    gh_bin: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let output = run_gh_with_timeout(gh_bin, &["api", "user", "-q", ".login"], timeout).await?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh api user failed while resolving authenticated login: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_authenticated_login(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub async fn fetch_issue_comments_with_gh_bin_with_timeout(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    timeout: Duration,
+) -> Result<Vec<IssueComment>> {
+    let full_repo = format!("{owner}/{repo}");
+    let issue_num_str = issue_number.to_string();
+    let output = run_gh_with_timeout(
+        gh_bin,
+        &[
+            "issue",
+            "view",
+            &issue_num_str,
+            "--repo",
+            &full_repo,
+            "--json",
+            "comments",
+        ],
+        timeout,
+    )
+    .await?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue view (comments) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_issue_comments_output(&output.stdout, &full_repo, issue_number)
+}
+
+pub async fn find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    bot_login: &str,
+    timeout: Duration,
+) -> Result<Option<IssueComment>> {
+    let comments =
+        fetch_issue_comments_with_gh_bin_with_timeout(gh_bin, owner, repo, issue_number, timeout)
+            .await?;
+    Ok(find_bot_comment_with_marker_exact_in_comments(
+        comments, marker, bot_login,
+    ))
+}
+
+/// Timeout-bounded variant of `post_bot_comment_with_marker_outcome_with_gh_bin`.
+///
+/// Preserves post-vs-readback outcome separation: if `gh issue comment`
+/// succeeds but the follow-up readback times out, the helper still reports
+/// `Posted` so that the caller can advance state.
+pub async fn post_bot_comment_with_marker_outcome_with_gh_bin_with_timeout(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+    timeout: Duration,
+) -> PostCommentOutcome {
+    let existing = match find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+        timeout,
+    )
+    .await
+    {
+        Ok(existing) => existing,
+        Err(err) => return PostCommentOutcome::PostFailed(err),
+    };
+    if let Some(existing) = existing {
+        return PostCommentOutcome::AlreadyExists(existing);
+    }
+
+    let full_body = format!("{marker}\n{body_text}");
+    let full_repo = format!("{owner}/{repo}");
+    let issue_num_str = issue_number.to_string();
+    let output = match run_gh_with_timeout(
+        gh_bin,
+        &[
+            "issue",
+            "comment",
+            &issue_num_str,
+            "--repo",
+            &full_repo,
+            "--body",
+            &full_body,
+        ],
+        timeout,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return PostCommentOutcome::PostFailed(RalphError::Orchestration(format!(
+                "failed to post bot marker comment on {full_repo}#{issue_number}: {err}"
+            )))
+        }
+    };
+
+    if !output.status.success() {
+        return PostCommentOutcome::PostFailed(RalphError::Orchestration(format!(
+            "gh issue comment (bot-scoped) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    match find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+        timeout,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!(
+                "warning: github: bot marker comment readback missing after successful post for {full_repo}#{issue_number}"
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: github: bot marker comment readback failed after successful post for {full_repo}#{issue_number}: {err}"
+            );
+        }
+    }
+
+    PostCommentOutcome::Posted
 }
 
 // ---------------------------------------------------------------------------

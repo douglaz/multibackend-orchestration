@@ -109,14 +109,22 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         return Ok(());
     }
 
-    let (open_prs, overflow) =
-        match github::list_open_non_draft_prs(&config.owner, &config.repo, &config.gh_bin).await {
-            Ok(result) => result,
-            Err(err) => {
-                eprintln!("warning: oracle review: PR list failed: {err}");
-                return Ok(());
-            }
-        };
+    let gh_timeout = Duration::from_secs(config.oracle_review_timeout_secs);
+
+    let (open_prs, overflow) = match github::list_open_non_draft_prs_with_timeout(
+        &config.owner,
+        &config.repo,
+        &config.gh_bin,
+        gh_timeout,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("warning: oracle review: PR list failed: {err}");
+            return Ok(());
+        }
+    };
 
     if overflow {
         eprintln!("warning: oracle review: gh pr list returned 100 PRs, results may be truncated");
@@ -138,13 +146,16 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         }
     };
 
-    let bot_login = match github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).await {
-        Ok(login) => login,
-        Err(err) => {
-            eprintln!("warning: oracle review: bot login resolve failed: {err}");
-            return Ok(());
-        }
-    };
+    let bot_login =
+        match github::fetch_authenticated_login_with_gh_bin_with_timeout(&config.gh_bin, gh_timeout)
+            .await
+        {
+            Ok(login) => login,
+            Err(err) => {
+                eprintln!("warning: oracle review: bot login resolve failed: {err}");
+                return Ok(());
+            }
+        };
 
     let mut success_count = 0u32;
     for pr in candidates {
@@ -157,13 +168,14 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         let marker = oracle_review_marker(pr.number, &pr.head_sha);
-        match github::find_bot_comment_with_marker_exact_with_gh_bin(
+        match github::find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
             &config.gh_bin,
             &config.owner,
             &config.repo,
             pr.number,
             &marker,
             &bot_login,
+            gh_timeout,
         )
         .await
         {
@@ -187,19 +199,24 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             }
         }
 
-        let diff =
-            match github::fetch_pr_diff(&config.owner, &config.repo, pr.number, &config.gh_bin)
-                .await
-            {
-                Ok(diff) => diff,
-                Err(err) => {
-                    eprintln!(
-                        "warning: oracle review: PR #{} diff fetch failed: {err}",
-                        pr.number
-                    );
-                    continue;
-                }
-            };
+        let diff = match github::fetch_pr_diff_with_timeout(
+            &config.owner,
+            &config.repo,
+            pr.number,
+            &config.gh_bin,
+            gh_timeout,
+        )
+        .await
+        {
+            Ok(diff) => diff,
+            Err(err) => {
+                eprintln!(
+                    "warning: oracle review: PR #{} diff fetch failed: {err}",
+                    pr.number
+                );
+                continue;
+            }
+        };
 
         let review_text = match invoke_oracle(
             &config.workspace_root,
@@ -226,7 +243,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             .saturating_sub(1);
         let truncated_body = truncate_for_github(review_text.trim(), available_body_chars);
 
-        match github::post_bot_comment_with_marker_outcome_with_gh_bin(
+        match github::post_bot_comment_with_marker_outcome_with_gh_bin_with_timeout(
             &config.gh_bin,
             &config.owner,
             &config.repo,
@@ -234,6 +251,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             &marker,
             &truncated_body,
             &bot_login,
+            gh_timeout,
         )
         .await
         {

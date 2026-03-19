@@ -102,6 +102,30 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon_oracle_review::overflow_warning_logged",
             func: overflow_warning_logged,
         },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_pr_list_timeout_leaves_state_unchanged",
+            func: gh_pr_list_timeout_leaves_state_unchanged,
+        },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_bot_login_timeout_leaves_state_unchanged",
+            func: gh_bot_login_timeout_leaves_state_unchanged,
+        },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_comment_lookup_timeout_isolated",
+            func: gh_comment_lookup_timeout_isolated,
+        },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_diff_timeout_isolated",
+            func: gh_diff_timeout_isolated,
+        },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_comment_post_timeout_does_not_advance_state",
+            func: gh_comment_post_timeout_does_not_advance_state,
+        },
+        ConformanceTest {
+            name: "daemon_oracle_review::gh_readback_timeout_still_advances_state",
+            func: gh_readback_timeout_still_advances_state,
+        },
     ]
 }
 
@@ -1172,6 +1196,350 @@ fn overflow_warning_logged(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn gh_pr_list_timeout_leaves_state_unchanged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[open_pr(11, "sha-11", false, "alice")]),
+                ),
+                ("MOCK_GH_HANG_PR_LIST".into(), "1".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("oracle review")
+                && combined.contains("PR list failed"),
+            "hung pr list should produce oracle review warning, got:\n{combined}"
+        );
+        assert!(
+            load_oracle_state(&dh).is_none(),
+            "state should not be created when pr list times out"
+        );
+    })
+}
+
+fn gh_bot_login_timeout_leaves_state_unchanged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[open_pr(11, "sha-11", false, "alice")]),
+                ),
+                ("MOCK_GH_HANG_API_USER".into(), "1".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("oracle review")
+                && combined.contains("bot login resolve failed"),
+            "hung bot login should produce oracle review warning, got:\n{combined}"
+        );
+        assert!(
+            load_oracle_state(&dh).is_none(),
+            "state should not be created when bot login times out"
+        );
+    })
+}
+
+fn gh_comment_lookup_timeout_isolated(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[
+                        open_pr(11, "sha-11", false, "alice"),
+                        open_pr(12, "sha-12", false, "alice"),
+                    ]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_GH_HANG_COMMENT_VIEW_PR".into(), "11".into()),
+                ("MOCK_ORACLE_OUTPUT".into(), "second pr review".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("PR #11") && combined.contains("marker check failed"),
+            "hung comment lookup should produce per-PR warning, got:\n{combined}"
+        );
+        let state = load_oracle_state(&dh).expect("state should exist for second PR");
+        assert!(
+            !state.reviewed.contains_key("11"),
+            "timed-out PR should not advance state"
+        );
+        assert_eq!(
+            state.reviewed.get("12"),
+            Some(&"sha-12".to_owned()),
+            "second PR should still be processed"
+        );
+    })
+}
+
+fn gh_diff_timeout_isolated(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[
+                        open_pr(11, "sha-11", false, "alice"),
+                        open_pr(12, "sha-12", false, "alice"),
+                    ]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_GH_HANG_DIFF_PR".into(), "11".into()),
+                ("MOCK_ORACLE_OUTPUT".into(), "second pr review".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("PR #11") && combined.contains("diff fetch failed"),
+            "hung diff fetch should produce per-PR warning, got:\n{combined}"
+        );
+        let state = load_oracle_state(&dh).expect("state should exist for second PR");
+        assert!(
+            !state.reviewed.contains_key("11"),
+            "timed-out PR should not advance state"
+        );
+        assert_eq!(
+            state.reviewed.get("12"),
+            Some(&"sha-12".to_owned()),
+            "second PR should still be processed"
+        );
+    })
+}
+
+fn gh_comment_post_timeout_does_not_advance_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[open_pr(11, "sha-11", false, "alice")]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_GH_HANG_COMMENT_POST_PR".into(), "11".into()),
+                ("MOCK_ORACLE_OUTPUT".into(), "review text".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("comment post failed"),
+            "hung comment post should produce warning, got:\n{combined}"
+        );
+        assert!(read_comment_log(&comments_file).is_empty());
+        assert!(
+            load_oracle_state(&dh).is_none(),
+            "timed-out comment post should not advance state"
+        );
+    })
+}
+
+fn gh_readback_timeout_still_advances_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = new_daemon_harness(h);
+        dh.init_workspace().expect("init failed");
+        enable_oracle_review(&dh);
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_timeout_secs",
+            "2",
+            "--global",
+        ])
+        .expect("set timeout");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_oracle_review_max_per_cycle",
+            "2",
+            "--global",
+        ])
+        .expect("set cap");
+
+        let gh_path = write_oracle_review_mock_gh(&dh).expect("mock gh");
+        let oracle_path = write_oracle_mock(&dh).expect("mock oracle");
+        let comments_file = path_in_temp(&dh, "comments.jsonl");
+        let readback_flag = path_in_temp(&dh, "readback-hang.flag");
+        let path_env = script_path_env(&oracle_path);
+        let git_bin = system_git_bin();
+
+        let output = run_daemon_once(
+            &dh,
+            &gh_path,
+            &git_bin,
+            &path_env,
+            vec![
+                (
+                    "MOCK_GH_OPEN_PRS".into(),
+                    open_prs_json(&[
+                        open_pr(11, "sha-11", false, "alice"),
+                        open_pr(12, "sha-12", false, "alice"),
+                        open_pr(13, "sha-13", false, "alice"),
+                    ]),
+                ),
+                (
+                    "MOCK_GH_COMMENTS_FILE".into(),
+                    comments_file.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_GH_HANG_COMMENT_READBACK_PR".into(), "11".into()),
+                (
+                    "MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE".into(),
+                    readback_flag.to_string_lossy().into_owned(),
+                ),
+                ("MOCK_ORACLE_OUTPUT".into(), "readback timeout test".into()),
+            ],
+        );
+
+        assert_exit_code(&output, 0);
+        let state = load_oracle_state(&dh).expect("state should exist");
+        assert_eq!(
+            state.reviewed.get("11"),
+            Some(&"sha-11".to_owned()),
+            "readback timeout after successful post should still advance state"
+        );
+        assert_eq!(
+            state.reviewed.get("12"),
+            Some(&"sha-12".to_owned()),
+            "second PR should still be processed"
+        );
+        assert!(
+            !state.reviewed.contains_key("13"),
+            "posted PRs should count toward per-cycle cap"
+        );
+    })
+}
+
 fn new_daemon_harness(h: &RalphHarness) -> RalphHarness {
     RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness")
 }
@@ -1331,6 +1699,15 @@ case "${1:-}" in
           [[ "$arg" == "title,body" ]] && want_title_body=1
         done
         if [[ $want_comments -eq 1 ]]; then
+          if [[ "${MOCK_GH_HANG_COMMENT_VIEW_PR:-}" == "$issue_number" ]]; then
+            while :; do :; done
+          fi
+          if [[ "${MOCK_GH_HANG_COMMENT_READBACK_PR:-}" == "$issue_number" \
+             && -n "${MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE:-}" \
+             && -e "${MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE:-}" ]]; then
+            rm -f "$MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE"
+            while :; do :; done
+          fi
           if [[ "${MOCK_GH_FAIL_COMMENT_READBACK_PR:-}" == "$issue_number" \
              && -n "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" \
              && -e "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" ]]; then
@@ -1362,11 +1739,18 @@ case "${1:-}" in
           fi
           prev="$arg"
         done
+        if [[ "${MOCK_GH_HANG_COMMENT_POST_PR:-}" == "$issue_number" ]]; then
+          while :; do :; done
+        fi
         if [[ "${MOCK_GH_FAIL_COMMENT_PR:-}" == "$issue_number" ]]; then
           echo "mock comment failure" >&2
           exit 1
         fi
         append_comment "$issue_number" "$body"
+        if [[ "${MOCK_GH_HANG_COMMENT_READBACK_PR:-}" == "$issue_number" \
+           && -n "${MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE:-}" ]]; then
+          : > "$MOCK_GH_HANG_COMMENT_READBACK_STATE_FILE"
+        fi
         if [[ "${MOCK_GH_FAIL_COMMENT_READBACK_PR:-}" == "$issue_number" \
            && -n "${MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE:-}" ]]; then
           : > "$MOCK_GH_FAIL_COMMENT_READBACK_STATE_FILE"
@@ -1381,11 +1765,17 @@ case "${1:-}" in
   pr)
     case "${2:-}" in
       list)
+        if [[ -n "${MOCK_GH_HANG_PR_LIST:-}" ]]; then
+          while :; do :; done
+        fi
         printf '%s' "${MOCK_GH_OPEN_PRS:-[]}"
         exit 0
         ;;
       diff)
         pr_number="${3:-0}"
+        if [[ "${MOCK_GH_HANG_DIFF_PR:-}" == "$pr_number" ]]; then
+          while :; do :; done
+        fi
         if [[ "${MOCK_GH_DIFF_FAIL_PR:-}" == "$pr_number" ]]; then
           echo "mock diff failure" >&2
           exit 1
@@ -1437,6 +1827,9 @@ case "${1:-}" in
     ;;
   api)
     if [[ "${2:-}" == "user" ]]; then
+      if [[ -n "${MOCK_GH_HANG_API_USER:-}" ]]; then
+        while :; do :; done
+      fi
       printf '%s\n' "${MOCK_GH_BOT_LOGIN:-ralph-bot}"
       exit 0
     fi
