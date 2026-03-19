@@ -1,0 +1,8 @@
+{
+  "id": "PR-216-pull_comment-2958526489",
+  "body": "PR review comment by @chatgpt-codex-connector[bot] on src/daemon/runtime.rs:905:\n\n**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Move Oracle reviews off the main daemon poll loop**\n\nWhen `workspace.daemon_oracle_review_enabled=true`, `run()` awaits this phase inline before `poll_and_claim()`. Inside `src/daemon/oracle_review.rs`, each candidate PR then awaits `invoke_oracle(...)` sequentially with `daemon_oracle_review_timeout_secs` (default 900s) and up to `daemon_oracle_review_max_per_cycle` reviews. On a repo with a slow or hung Oracle invocation, the daemon can spend many minutes inside review processing and stop claiming ready issues or advancing rebase/review polling during that window.\n\nUseful? React with 👍 / 👎.",
+  "priority": "P2",
+  "source": "pr-review",
+  "source_detail": "pr#216/pull_comment#2958526489",
+  "created_at": "2026-03-19T13:06:00.736857338Z"
+}

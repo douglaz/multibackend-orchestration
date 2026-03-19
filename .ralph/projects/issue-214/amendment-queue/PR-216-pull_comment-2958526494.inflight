@@ -1,0 +1,8 @@
+{
+  "id": "PR-216-pull_comment-2958526494",
+  "body": "PR review comment by @chatgpt-codex-connector[bot] on src/daemon/github.rs:283:\n\n**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Pin the reviewed diff to the listed PR head SHA**\n\n`oracle_review_phase` records the `headRefOid` from `list_open_non_draft_prs()` and uses that SHA for the marker/state, but this helper later fetches the diff with `gh pr diff <number>` and never uses the saved SHA. If a contributor pushes between the initial list and the diff/oracle run, the daemon will review the newer patch while still posting `<!-- ralph:oracle-review:{pr}:{old_sha} -->` and saving the old SHA as reviewed. That leaves the current head looking unreviewed on the next cycle, so active PRs can get duplicate reviews or feedback attached to the wrong revision.\n\nUseful? React with 👍 / 👎.",
+  "priority": "P2",
+  "source": "pr-review",
+  "source_detail": "pr#216/pull_comment#2958526494",
+  "created_at": "2026-03-19T13:06:00.736955793Z"
+}
