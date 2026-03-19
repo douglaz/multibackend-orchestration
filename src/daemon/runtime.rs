@@ -18,6 +18,7 @@ use crate::daemon::rebase_agent::{
 };
 
 use crate::daemon::interactive_prd::{self, PrdPollConfig};
+use crate::daemon::oracle_review;
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
@@ -75,6 +76,14 @@ pub struct DaemonRuntimeConfig {
     pub prd_backend_timeout_secs: u64,
     /// Timeout (seconds) used when shutting down the PRD background task.
     pub prd_shutdown_timeout_secs: u64,
+    /// Whether automated Oracle PR reviews are enabled.
+    pub oracle_review_enabled: bool,
+    /// Timeout (seconds) for a single Oracle invocation.
+    pub oracle_review_timeout_secs: u64,
+    /// Optional allowlist of GitHub authors eligible for Oracle review.
+    pub oracle_review_authors: Vec<String>,
+    /// Maximum successful Oracle reviews to post per daemon cycle.
+    pub oracle_review_max_per_cycle: u32,
     /// Executable used for git invocations in interactive PRD.
     pub git_bin: String,
     /// Executable used for GitHub CLI invocations in interactive PRD.
@@ -98,7 +107,7 @@ where
 
 const ARTIFACT_WATCH_POLL_SECONDS: u64 = 2;
 const DRAFT_PR_WATCH_POLL_SECONDS: u64 = 15;
-const GITHUB_COMMENT_LIMIT: usize = 65_536;
+pub(crate) const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
 const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
@@ -635,7 +644,7 @@ fn newest_by_mtime(candidates: Vec<(PathBuf, SystemTime)>) -> Option<PathBuf> {
         .map(|(path, _)| path)
 }
 
-fn truncate_for_github(body: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_for_github(body: &str, max_chars: usize) -> String {
     if body.chars().count() <= max_chars {
         return body.to_owned();
     }
@@ -890,6 +899,10 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
             if let Err(err) = pr_review_phase(config, &mut children, &repo_root_lock).await {
                 eprintln!("warning: PR review polling failed: {err}");
             }
+        }
+
+        if let Err(err) = oracle_review::oracle_review_phase(config).await {
+            eprintln!("warning: oracle review phase failed: {err}");
         }
 
         // Interactive PRD phase: in single-iteration mode, run exactly one
@@ -4754,6 +4767,10 @@ mod tests {
             prd_max_revisions: 1,
             prd_backend_timeout_secs: 60,
             prd_shutdown_timeout_secs: 10,
+            oracle_review_enabled: false,
+            oracle_review_timeout_secs: 900,
+            oracle_review_authors: vec![],
+            oracle_review_max_per_cycle: 3,
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
@@ -4845,6 +4862,10 @@ mod tests {
             prd_max_revisions: 1,
             prd_backend_timeout_secs: 60,
             prd_shutdown_timeout_secs: 10,
+            oracle_review_enabled: false,
+            oracle_review_timeout_secs: 900,
+            oracle_review_authors: vec![],
+            oracle_review_max_per_cycle: 3,
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,

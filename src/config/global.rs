@@ -87,6 +87,14 @@ pub struct WorkspaceConfig {
     pub daemon_prd_backend_timeout_secs: u64,
     #[serde(default = "default_daemon_prd_shutdown_timeout_secs")]
     pub daemon_prd_shutdown_timeout_secs: u64,
+    #[serde(default = "default_daemon_oracle_review_enabled")]
+    pub daemon_oracle_review_enabled: bool,
+    #[serde(default = "default_daemon_oracle_review_timeout_secs")]
+    pub daemon_oracle_review_timeout_secs: u64,
+    #[serde(default)]
+    pub daemon_oracle_review_authors: Vec<String>,
+    #[serde(default = "default_daemon_oracle_review_max_per_cycle")]
+    pub daemon_oracle_review_max_per_cycle: u32,
     /// Maximum backend timeout retries per invocation (default: 3, max: 10).
     #[serde(default)]
     pub daemon_max_backend_retries: Option<u8>,
@@ -537,6 +545,10 @@ impl Default for WorkspaceConfig {
             daemon_prd_max_revisions: default_daemon_prd_max_revisions(),
             daemon_prd_backend_timeout_secs: default_daemon_prd_backend_timeout_secs(),
             daemon_prd_shutdown_timeout_secs: default_daemon_prd_shutdown_timeout_secs(),
+            daemon_oracle_review_enabled: default_daemon_oracle_review_enabled(),
+            daemon_oracle_review_timeout_secs: default_daemon_oracle_review_timeout_secs(),
+            daemon_oracle_review_authors: Vec::new(),
+            daemon_oracle_review_max_per_cycle: default_daemon_oracle_review_max_per_cycle(),
             daemon_max_backend_retries: None,
             daemon_pr_review_whitelist: Vec::new(),
         }
@@ -947,6 +959,18 @@ fn default_daemon_prd_backend_timeout_secs() -> u64 {
 
 fn default_daemon_prd_shutdown_timeout_secs() -> u64 {
     60
+}
+
+fn default_daemon_oracle_review_enabled() -> bool {
+    false
+}
+
+fn default_daemon_oracle_review_timeout_secs() -> u64 {
+    900
+}
+
+fn default_daemon_oracle_review_max_per_cycle() -> u32 {
+    3
 }
 
 fn default_planner_max_prior_loops() -> Option<usize> {
@@ -1415,6 +1439,30 @@ pub(crate) fn set_global_config_value(
         "workspace.daemon_rebase_agent_backend" => {
             crate::daemon::rebase_agent::parse_rebase_agent_backend(raw_value)?;
             config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
+        }
+        "workspace.daemon_oracle_review_enabled" => {
+            config.workspace.daemon_oracle_review_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_oracle_review_timeout_secs" => {
+            let timeout = cfg_parse_u64(raw_value, key)?;
+            if timeout == 0 {
+                return Err(crate::error::RalphError::Validation(format!(
+                    "key '{key}' must be > 0"
+                )));
+            }
+            config.workspace.daemon_oracle_review_timeout_secs = timeout;
+        }
+        "workspace.daemon_oracle_review_authors" => {
+            config.workspace.daemon_oracle_review_authors = cfg_parse_string_list(raw_value)?;
+        }
+        "workspace.daemon_oracle_review_max_per_cycle" => {
+            let max_per_cycle = cfg_parse_u32(raw_value, key)?;
+            if max_per_cycle == 0 {
+                return Err(crate::error::RalphError::Validation(format!(
+                    "key '{key}' must be > 0"
+                )));
+            }
+            config.workspace.daemon_oracle_review_max_per_cycle = max_per_cycle;
         }
         "workspace.daemon_pr_review_whitelist" => {
             config.workspace.daemon_pr_review_whitelist = cfg_parse_string_list(raw_value)?;
@@ -3675,6 +3723,68 @@ planner_state_in_prompt = "summary"
         set_global_config_value(&mut config, "workspace.daemon_pr_review_whitelist", "[]")
             .expect("set empty whitelist should succeed");
         assert!(config.workspace.daemon_pr_review_whitelist.is_empty());
+    }
+
+    #[test]
+    fn set_global_config_value_oracle_review_roundtrip() {
+        let mut config = GlobalConfig::default();
+
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_enabled",
+            "true",
+        )
+        .expect("set enabled");
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_timeout_secs",
+            "123",
+        )
+        .expect("set timeout");
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_authors",
+            r#"["Alice","bob"]"#,
+        )
+        .expect("set authors");
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_max_per_cycle",
+            "7",
+        )
+        .expect("set max per cycle");
+
+        assert!(config.workspace.daemon_oracle_review_enabled);
+        assert_eq!(config.workspace.daemon_oracle_review_timeout_secs, 123);
+        assert_eq!(
+            config.workspace.daemon_oracle_review_authors,
+            vec!["Alice".to_owned(), "bob".to_owned()]
+        );
+        assert_eq!(config.workspace.daemon_oracle_review_max_per_cycle, 7);
+    }
+
+    #[test]
+    fn set_global_config_value_rejects_zero_oracle_review_timeout() {
+        let mut config = GlobalConfig::default();
+        let error = set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_timeout_secs",
+            "0",
+        )
+        .expect_err("zero timeout should be rejected");
+        assert!(error.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn set_global_config_value_rejects_zero_oracle_review_max_per_cycle() {
+        let mut config = GlobalConfig::default();
+        let error = set_global_config_value(
+            &mut config,
+            "workspace.daemon_oracle_review_max_per_cycle",
+            "0",
+        )
+        .expect_err("zero cap should be rejected");
+        assert!(error.to_string().contains("must be > 0"));
     }
 
     #[test]

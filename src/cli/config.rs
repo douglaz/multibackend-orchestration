@@ -180,6 +180,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
                     "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
                     "rebase_agent_backend": effective.daemon.rebase_agent_backend,
+                    "oracle_review_enabled": effective.daemon.oracle_review_enabled,
+                    "oracle_review_timeout_secs": effective.daemon.oracle_review_timeout_secs,
+                    "oracle_review_authors": effective.daemon.oracle_review_authors,
+                    "oracle_review_max_per_cycle": effective.daemon.oracle_review_max_per_cycle,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -289,6 +293,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
                     "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
                     "rebase_agent_backend": effective.daemon.rebase_agent_backend,
+                    "oracle_review_enabled": effective.daemon.oracle_review_enabled,
+                    "oracle_review_timeout_secs": effective.daemon.oracle_review_timeout_secs,
+                    "oracle_review_authors": effective.daemon.oracle_review_authors,
+                    "oracle_review_max_per_cycle": effective.daemon.oracle_review_max_per_cycle,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
