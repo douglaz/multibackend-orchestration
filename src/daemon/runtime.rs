@@ -878,6 +878,19 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     // Phase 3: Main loop with in-memory child tracking
     let mut children: HashMap<u32, TaskHandle> = HashMap::new();
     let mut iteration: u64 = 0;
+    // Track the current oracle review task so it can run to completion across
+    // iterations without blocking the main loop or exceeding one concurrent run.
+    // AbortOnDrop aborts the spawned task when run() is dropped/aborted.
+    struct AbortOnDrop {
+        handle: tokio::task::JoinHandle<()>,
+        abort: tokio::task::AbortHandle,
+    }
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.abort.abort();
+        }
+    }
+    let mut oracle_task: Option<AbortOnDrop> = None;
 
     loop {
         iteration = iteration.saturating_add(1);
@@ -901,8 +914,12 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
             }
         }
 
-        if let Err(err) = oracle_review::oracle_review_phase(config).await {
-            eprintln!("warning: oracle review phase failed: {err}");
+        // Oracle review phase: in single-iteration mode, run one inline tick.
+        // In continuous mode, oracle review runs as a background task spawned above.
+        if config.oracle_review_enabled && config.single_iteration {
+            if let Err(err) = oracle_review::oracle_review_phase(config).await {
+                eprintln!("warning: oracle review phase failed: {err}");
+            }
         }
 
         // Interactive PRD phase: in single-iteration mode, run exactly one
@@ -944,10 +961,36 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
             break;
         }
 
+        // Spawn oracle review if enabled and no previous run is still active.
+        // The task runs concurrently with the poll sleep so it doesn't block
+        // the main loop, runs to completion even if it outlasts poll_seconds,
+        // and is limited to one concurrent run (preserves per-cycle cap).
+        if config.oracle_review_enabled {
+            let still_running = oracle_task
+                .as_ref()
+                .is_some_and(|t| !t.handle.is_finished());
+            if !still_running {
+                // Reap the previous task (drop triggers abort, but it's
+                // already finished so abort is a no-op).
+                drop(oracle_task.take());
+                let cfg = config.clone();
+                let handle = tokio::spawn(async move {
+                    if let Err(err) = oracle_review::oracle_review_phase(&cfg).await {
+                        eprintln!("warning: oracle review phase failed: {err}");
+                    }
+                });
+                let abort = handle.abort_handle();
+                oracle_task = Some(AbortOnDrop { handle, abort });
+            }
+        }
+
         tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
     }
 
-    // Phase 4: PRD shutdown — cancel token, bounded await, explicit abort on timeout.
+    // Phase 4a: Oracle review shutdown — Drop triggers abort via AbortOnDrop.
+    drop(oracle_task.take());
+
+    // Phase 4b: PRD shutdown — cancel token, bounded await, explicit abort on timeout.
     //
     // We capture `abort_handle` before awaiting the `JoinHandle` because
     // `JoinHandle::abort()` consumes `self` while we need to await first.
