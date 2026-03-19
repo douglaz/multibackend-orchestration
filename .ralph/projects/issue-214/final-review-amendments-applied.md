@@ -61,3 +61,46 @@ The main config/runtime wiring is in place and the targeted unit tests for `pars
 ### Reviewer
 codex
 
+
+## Round 2
+
+### Amendment: ORACLE-REVIEW-FR-001
+
+### Problem
+The oracle phase treats the entire `post_bot_comment_with_marker_with_gh_bin(...)` call as the success boundary, and only increments `success_count` plus persists state on `Ok(_)` ([src/daemon/oracle_review.rs#L229](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/oracle_review.rs#L229)). That helper, however, returns `Err` not only when `gh issue comment` fails, but also when the follow-up comment readback fails after a successful post ([src/daemon/github.rs#L2208](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L2208), [src/daemon/github.rs#L2230](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L2230), [src/daemon/github.rs#L2257](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L2257), [src/daemon/github.rs#L1923](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L1923)).
+
+That creates a real misclassification path: the review comment is already on GitHub, but the daemon logs `comment post failed`, does not save `(pr_number, head_sha)`, and does not count the posted review toward `daemon_oracle_review_max_per_cycle`. In a transient readback failure, one cycle can therefore post more comments than the configured cap and the next cycle has to self-heal via marker scan instead of having correct state immediately.
+
+### Proposed Change
+Make the success boundary match the actual post operation, not the metadata readback.
+
+A concrete fix is:
+1. Split bot-comment posting into distinct outcomes: `already_exists`, `posted`, and `post_failed`.
+2. Treat a zero-exit `gh issue comment` as `posted` even if the optional fetch-back of comment metadata fails afterward.
+3. In `oracle_review_phase`, advance state and increment `success_count` on `posted`, skip counting `already_exists`, and reserve `comment post failed` for genuine comment-command failures.
+4. Add a validate case where `issue comment` succeeds but the subsequent `issue view --json comments` call fails, asserting that state still advances and the per-cycle cap still reflects the already-posted review.
+
+### Affected Files
+- [src/daemon/github.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs) - separate successful post semantics from best-effort readback.
+- [src/daemon/oracle_review.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/oracle_review.rs) - count and persist successful posts correctly.
+- [src/validate/tests_daemon_oracle_review.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/validate/tests_daemon_oracle_review.rs) - add a conformance test for post-success/readback-failure behavior.
+
+---
+
+## Context Provided
+Reviewed `git diff a8a8b72c03e42dc9bf028163468c15673660e235...HEAD -- . ':(exclude).ralph'`, traced the new oracle-review flow and helper contracts, and ran:
+- `nix develop -c cargo test oracle_review -- --nocapture`
+- `nix develop -c cargo test parse_open_prs -- --nocapture`
+- `nix develop -c cargo run -- validate --bin target/debug/ralph --filter daemon_oracle_review --verbose`
+
+I also spot-checked the upstream Oracle CLI contract and verified the integration flags used here are documented: https://github.com/steipete/oracle
+
+## Master Prompt
+The review focused on correctness, failure isolation, persisted dedup state, comment idempotency, cap enforcement, and whether the new phase stays non-fatal inside the daemon poll loop.
+
+## Summary
+One amendment is required. The new phase’s state/cap accounting is tied to comment readback rather than the actual GitHub post, which makes transient readback failures behave like false negatives and breaks the intended per-cycle limits.
+
+### Reviewer
+codex
+
