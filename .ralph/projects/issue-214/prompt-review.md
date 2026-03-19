@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-214
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-19T02:36:19Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The prompt leaves the `oracle` CLI invocation ambiguous. It mentions both temp-file input and possible stdin piping, then says the exact approach should be validated during implementation. That creates avoidable ambiguity in a feature request that should already define the contract.
+- The marker/idempotency flow is inconsistent. Acceptance criteria only require skipping posting when a bot-authored marker already exists, but the test plan expects the phase to skip `oracle` invocation entirely when the marker exists. The prompt should make that optimization explicit.
+- The logging contract is under-specified. A few warnings are named exactly, but most failure cases only say "log warning", which makes implementation and conformance tests less deterministic.
+- The prompt specifies many approximate line numbers and implementation suggestions that are useful as hints, but it does not clearly separate mandatory behavior from optional implementation detail. That makes it harder for downstream loops to know what can be adapted safely.
+- The runtime integration requirement is slightly redundant and potentially inconsistent: the acceptance criteria say the phase is added to the poll loop after `pr_review_phase`, while the technical approach also wraps the call in `if config.oracle_review_enabled`. The phase itself already has an early return, so the prompt should choose one behavior and make it authoritative.
+- The state update contract is mostly clear, but it does not explicitly say whether state should be saved after each successful PR review or batched once per cycle. This matters for crash safety and test expectations.
+- The config requirements are broad but not explicit about naming parity in all surfaces. For example, the prompt says `config get daemon.*` output should include fields while the match arms are under `workspace.*`. The intended user-facing keys should be stated unambiguously.
+- The test plan is strong, but it does not clearly distinguish conformance tests that must be added from optional unit tests. That can lead to downstream loops spending effort in the wrong place if time is constrained.
+
+## Refined Prompt
 ## Summary
 
 Add a new daemon phase, `oracle_review_phase`, that automatically reviews open, non-draft pull requests in the monitored GitHub repository using the `oracle` CLI (`@steipete/oracle`) and posts the result as an idempotent top-level PR comment.
