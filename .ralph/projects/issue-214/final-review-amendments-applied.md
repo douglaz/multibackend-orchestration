@@ -138,3 +138,35 @@ One amendment is needed: oracle marker dedup currently accepts substring matches
 ### Reviewer
 codex
 
+
+## Round 4
+
+### Amendment: ORACLE-REV-FR-002
+
+### Problem
+The oracle subprocess has a timeout, but all of the `gh` subprocesses used by the phase are unbounded. [`list_open_non_draft_prs`](//tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L241), [`fetch_pr_diff`](//tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L274), [`fetch_issue_comments_with_gh_bin`](//tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L1932), and [`fetch_authenticated_login_with_gh_bin`](//tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs#L2015) all use `Command::output().await` without any deadline. The phase then awaits those calls inline and sequentially in [`src/daemon/oracle_review.rs:112`](//tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/oracle_review.rs#L112).
+
+If `gh pr diff` or `gh issue view --json comments` hangs, one PR can stall the entire oracle-review phase indefinitely, preventing later eligible PRs from being processed and blocking the poll loop from advancing. That breaks the intended non-fatal/per-PR-isolated behavior under real operational failures.
+
+### Proposed Change
+Add bounded execution for oracle-review `gh` calls. Reuse the existing timeout/kill behavior via `process::run_command_with_timeout` under `spawn_blocking`, or introduce an equivalent async helper that enforces a deadline and kills the child process group. The phase should log a stable timeout warning and continue to the next PR when comment lookup or diff fetch times out.
+
+### Affected Files
+- [src/daemon/github.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/github.rs) - add timeout-bounded execution for oracle-review-related `gh` helpers
+- [src/daemon/oracle_review.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/daemon/oracle_review.rs) - handle `gh` timeout failures as per-PR warnings and continue
+- [src/validate/tests_daemon_oracle_review.rs](/tmp/ralph-daemon-orch/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-214/src/validate/tests_daemon_oracle_review.rs) - add coverage for hung `gh` comment/diff calls not wedging the cycle
+
+---
+
+## Context Provided
+Reviewed the branch diff against the `master` merge-base, then traced the changed daemon/config/GitHub helper paths and the new validate module.
+
+## Master Prompt
+Add an independent `oracle_review_phase` that reviews open non-draft PRs with `oracle`, dedups by `(pr_number, head_sha)`, persists state, posts idempotent top-level PR comments, and remains non-fatal inside the daemon poll loop.
+
+## Summary
+I found two concrete robustness issues. The larger one is repo-isolation: the new persisted state is shared across all repos in a workspace even though the daemon can run multiple repo runtimes concurrently. The second is that a hung `gh` subprocess can still wedge the phase even though `oracle` itself is timeout-bounded. Focused unit tests I ran for `parse_open_prs`, `OracleReviewState`, and the new post-comment outcome helper passed, but they do not cover either of these failure modes.
+
+### Reviewer
+codex
+
