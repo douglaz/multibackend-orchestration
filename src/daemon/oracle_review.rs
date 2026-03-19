@@ -278,10 +278,6 @@ fn oracle_review_marker(pr_number: u32, head_sha: &str) -> String {
     format!("<!-- ralph:oracle-review:{pr_number}:{head_sha} -->")
 }
 
-fn combined_oracle_prompt() -> String {
-    format!("{ORACLE_SYSTEM_PROMPT}\n\nReview the attached PR diff.")
-}
-
 fn unique_state_temp_path(path: &Path) -> PathBuf {
     let pid = std::process::id();
     let now = SystemTime::now()
@@ -351,7 +347,7 @@ async fn invoke_oracle(
             let mut command = std::process::Command::new("oracle");
             command
                 .arg("--prompt")
-                .arg(combined_oracle_prompt())
+                .arg(ORACLE_SYSTEM_PROMPT)
                 .arg("--file")
                 .arg(&diff_path)
                 .arg("--write-output")
