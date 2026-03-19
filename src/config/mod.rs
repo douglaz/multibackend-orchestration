@@ -122,6 +122,10 @@ pub struct EffectiveDaemonConfig {
     pub prd_max_revisions: u32,
     pub prd_backend_timeout_secs: u64,
     pub prd_shutdown_timeout_secs: u64,
+    pub oracle_review_enabled: bool,
+    pub oracle_review_timeout_secs: u64,
+    pub oracle_review_authors: Vec<String>,
+    pub oracle_review_max_per_cycle: u32,
     /// Maximum number of backend timeout retries per invocation.
     pub max_backend_retries: Option<u8>,
     pub pr_review_whitelist: Vec<String>,
@@ -522,6 +526,10 @@ pub fn resolve_daemon_config(
         prd_max_revisions: global.workspace.daemon_prd_max_revisions,
         prd_backend_timeout_secs: global.workspace.daemon_prd_backend_timeout_secs,
         prd_shutdown_timeout_secs: global.workspace.daemon_prd_shutdown_timeout_secs,
+        oracle_review_enabled: global.workspace.daemon_oracle_review_enabled,
+        oracle_review_timeout_secs: global.workspace.daemon_oracle_review_timeout_secs,
+        oracle_review_authors: global.workspace.daemon_oracle_review_authors.clone(),
+        oracle_review_max_per_cycle: global.workspace.daemon_oracle_review_max_per_cycle,
         max_backend_retries: global.workspace.daemon_max_backend_retries,
         pr_review_whitelist: global.workspace.daemon_pr_review_whitelist.clone(),
     }
@@ -643,6 +651,20 @@ pub fn validate_effective_daemon_config(
         return Err(RalphError::Validation(format!(
             "workspace.daemon_prd_shutdown_timeout_secs must be >= 1, got {}",
             daemon.prd_shutdown_timeout_secs
+        )));
+    }
+
+    if daemon.oracle_review_timeout_secs < 1 {
+        return Err(RalphError::Validation(format!(
+            "workspace.daemon_oracle_review_timeout_secs must be >= 1, got {}",
+            daemon.oracle_review_timeout_secs
+        )));
+    }
+
+    if daemon.oracle_review_max_per_cycle < 1 {
+        return Err(RalphError::Validation(format!(
+            "workspace.daemon_oracle_review_max_per_cycle must be >= 1, got {}",
+            daemon.oracle_review_max_per_cycle
         )));
     }
 

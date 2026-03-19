@@ -82,6 +82,13 @@ pub struct PrMergeInfo {
     pub head_oid: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPrInfo {
+    pub number: u32,
+    pub head_sha: String,
+    pub author: String,
+}
+
 /// Poll open issues matching all supplied labels.
 ///
 /// Uses `gh issue list --repo <owner/repo> --limit 100 --json number,title,labels,body`
@@ -229,6 +236,66 @@ pub async fn query_pr_merge_info(owner: &str, repo: &str, pr_number: u32) -> Res
 
     let raw = String::from_utf8_lossy(&output.stdout);
     parse_pr_merge_info(raw.trim())
+}
+
+pub async fn list_open_non_draft_prs(
+    owner: &str,
+    repo: &str,
+    gh_bin: &str,
+) -> Result<(Vec<OpenPrInfo>, bool)> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new(gh_bin)
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            &full_repo,
+            "--state",
+            "open",
+            "--json",
+            "number,headRefOid,isDraft,author",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .await
+        .map_err(|err| RalphError::Orchestration(format!("failed to run gh pr list: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr list failed for {full_repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_open_prs(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+pub async fn fetch_pr_diff(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    gh_bin: &str,
+) -> Result<String> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new(gh_bin)
+        .args(["pr", "diff", &pr_number.to_string(), "--repo", &full_repo])
+        .output()
+        .await
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr diff for {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr diff failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Filter out issues that already have any `ralph:*` label.
@@ -1817,6 +1884,22 @@ struct RawPrDraftInfo {
     is_draft: bool,
 }
 
+#[derive(Deserialize)]
+struct RawOpenPrInfo {
+    number: u32,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    #[serde(default)]
+    author: Option<RawAuthorLogin>,
+}
+
+#[derive(Deserialize)]
+struct RawAuthorLogin {
+    login: String,
+}
+
 /// A structured issue comment returned by [`fetch_issue_comments`].
 #[derive(Debug, Clone)]
 pub struct IssueComment {
@@ -2257,6 +2340,23 @@ fn parse_pr_is_draft(raw: &str) -> Result<bool> {
     Ok(parsed.is_draft)
 }
 
+pub fn parse_open_prs(raw: &str) -> Result<(Vec<OpenPrInfo>, bool)> {
+    let parsed: Vec<RawOpenPrInfo> = serde_json::from_str(raw).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh pr list output: {err}"))
+    })?;
+    let overflow = parsed.len() == 100;
+    let prs = parsed
+        .into_iter()
+        .filter(|pr| !pr.is_draft)
+        .map(|pr| OpenPrInfo {
+            number: pr.number,
+            head_sha: pr.head_ref_oid,
+            author: pr.author.map(|author| author.login).unwrap_or_default(),
+        })
+        .collect();
+    Ok((prs, overflow))
+}
+
 fn parse_authenticated_login(raw: &str) -> Result<String> {
     let login = raw.trim();
     if login.is_empty() {
@@ -2625,8 +2725,8 @@ mod tests {
 
     use super::{
         has_diff, is_invalid_revision_error, is_retryable_push_error, parse_issue_list,
-        parse_pr_is_draft, parse_pr_merge_info, push_branch_with_retry_impl, GhIssue,
-        PrMergeStatus, REQUIRED_LABELS,
+        parse_open_prs, parse_pr_is_draft, parse_pr_merge_info, push_branch_with_retry_impl,
+        GhIssue, PrMergeStatus, REQUIRED_LABELS,
     };
     use crate::error::RalphError;
 
@@ -3077,6 +3177,38 @@ mod tests {
         let raw = r#"{"isDraft":false}"#;
         let is_draft = parse_pr_is_draft(raw).expect("draft state should parse");
         assert!(!is_draft);
+    }
+
+    #[test]
+    fn parse_open_prs_filters_drafts_and_tracks_overflow() {
+        let raw = format!(
+            "[{},{}]",
+            r#"{"number":1,"headRefOid":"sha-1","isDraft":false,"author":{"login":"alice"}}"#,
+            r#"{"number":2,"headRefOid":"sha-2","isDraft":true,"author":{"login":"bob"}}"#
+        );
+        let (prs, overflow) = parse_open_prs(&raw).expect("open PRs should parse");
+
+        assert!(!overflow);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 1);
+        assert_eq!(prs[0].head_sha, "sha-1");
+        assert_eq!(prs[0].author, "alice");
+    }
+
+    #[test]
+    fn parse_open_prs_marks_exact_100_as_overflow() {
+        let items: Vec<String> = (1..=100)
+            .map(|number| {
+                format!(
+                    r#"{{"number":{number},"headRefOid":"sha-{number}","isDraft":false,"author":{{"login":"user-{number}"}}}}"#
+                )
+            })
+            .collect();
+        let raw = format!("[{}]", items.join(","));
+
+        let (prs, overflow) = parse_open_prs(&raw).expect("open PRs should parse");
+        assert!(overflow);
+        assert_eq!(prs.len(), 100);
     }
 
     #[test]
