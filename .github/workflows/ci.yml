@@ -14,7 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v21
-      - uses: DeterminateSystems/magic-nix-cache-action@v13
       - run: nix build -L
       - run: nix develop -c cargo clippy --all-targets -- -D warnings
       - run: nix develop -c cargo fmt -- --check
