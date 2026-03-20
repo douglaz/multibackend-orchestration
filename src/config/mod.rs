@@ -126,6 +126,7 @@ pub struct EffectiveDaemonConfig {
     pub oracle_review_timeout_secs: u64,
     pub oracle_review_authors: Vec<String>,
     pub oracle_review_max_per_cycle: u32,
+    pub oracle_review_cooldown_secs: u64,
     /// Maximum number of backend timeout retries per invocation.
     pub max_backend_retries: Option<u8>,
     pub pr_review_whitelist: Vec<String>,
@@ -530,6 +531,7 @@ pub fn resolve_daemon_config(
         oracle_review_timeout_secs: global.workspace.daemon_oracle_review_timeout_secs,
         oracle_review_authors: global.workspace.daemon_oracle_review_authors.clone(),
         oracle_review_max_per_cycle: global.workspace.daemon_oracle_review_max_per_cycle,
+        oracle_review_cooldown_secs: global.workspace.daemon_oracle_review_cooldown_secs,
         max_backend_retries: global.workspace.daemon_max_backend_retries,
         pr_review_whitelist: global.workspace.daemon_pr_review_whitelist.clone(),
     }

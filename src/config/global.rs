@@ -95,6 +95,8 @@ pub struct WorkspaceConfig {
     pub daemon_oracle_review_authors: Vec<String>,
     #[serde(default = "default_daemon_oracle_review_max_per_cycle")]
     pub daemon_oracle_review_max_per_cycle: u32,
+    #[serde(default = "default_daemon_oracle_review_cooldown_secs")]
+    pub daemon_oracle_review_cooldown_secs: u64,
     /// Maximum backend timeout retries per invocation (default: 3, max: 10).
     #[serde(default)]
     pub daemon_max_backend_retries: Option<u8>,
@@ -549,6 +551,7 @@ impl Default for WorkspaceConfig {
             daemon_oracle_review_timeout_secs: default_daemon_oracle_review_timeout_secs(),
             daemon_oracle_review_authors: Vec::new(),
             daemon_oracle_review_max_per_cycle: default_daemon_oracle_review_max_per_cycle(),
+            daemon_oracle_review_cooldown_secs: default_daemon_oracle_review_cooldown_secs(),
             daemon_max_backend_retries: None,
             daemon_pr_review_whitelist: Vec::new(),
         }
@@ -971,6 +974,10 @@ fn default_daemon_oracle_review_timeout_secs() -> u64 {
 
 fn default_daemon_oracle_review_max_per_cycle() -> u32 {
     3
+}
+
+fn default_daemon_oracle_review_cooldown_secs() -> u64 {
+    600 // 10 minutes
 }
 
 fn default_planner_max_prior_loops() -> Option<usize> {
