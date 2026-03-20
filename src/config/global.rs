@@ -1471,6 +1471,9 @@ pub(crate) fn set_global_config_value(
             }
             config.workspace.daemon_oracle_review_max_per_cycle = max_per_cycle;
         }
+        "workspace.daemon_oracle_review_cooldown_secs" => {
+            config.workspace.daemon_oracle_review_cooldown_secs = cfg_parse_u64(raw_value, key)?;
+        }
         "workspace.daemon_pr_review_whitelist" => {
             config.workspace.daemon_pr_review_whitelist = cfg_parse_string_list(raw_value)?;
         }
