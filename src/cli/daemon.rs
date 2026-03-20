@@ -260,6 +260,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             oracle_review_authors: daemon_cfg.oracle_review_authors.clone(),
             oracle_review_max_per_cycle: daemon_cfg.oracle_review_max_per_cycle,
             oracle_review_cooldown_secs: daemon_cfg.oracle_review_cooldown_secs,
+            oracle_review_command: daemon_cfg.oracle_review_command.clone(),
             oracle_review_args: daemon_cfg.oracle_review_args.clone(),
             git_bin,
             gh_bin,

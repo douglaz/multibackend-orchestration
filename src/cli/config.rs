@@ -185,6 +185,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "oracle_review_authors": effective.daemon.oracle_review_authors,
                     "oracle_review_max_per_cycle": effective.daemon.oracle_review_max_per_cycle,
                     "oracle_review_cooldown_secs": effective.daemon.oracle_review_cooldown_secs,
+                    "oracle_review_command": effective.daemon.oracle_review_command,
                     "oracle_review_args": effective.daemon.oracle_review_args,
                 },
                 "templates": {
@@ -300,6 +301,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "oracle_review_authors": effective.daemon.oracle_review_authors,
                     "oracle_review_max_per_cycle": effective.daemon.oracle_review_max_per_cycle,
                     "oracle_review_cooldown_secs": effective.daemon.oracle_review_cooldown_secs,
+                    "oracle_review_command": effective.daemon.oracle_review_command,
                     "oracle_review_args": effective.daemon.oracle_review_args,
                 },
                 "templates": {
