@@ -1551,6 +1551,16 @@ fn enable_oracle_review(dh: &RalphHarness) {
         "--global",
     ])
     .expect("enable oracle review");
+    // Use bare `oracle` command so the mock script in PATH is invoked
+    // instead of the default `npx -y @steipete/oracle`.
+    dh.ralph_ok([
+        "config",
+        "set",
+        "workspace.daemon_oracle_review_command",
+        "oracle",
+        "--global",
+    ])
+    .expect("set oracle command");
 }
 
 fn run_daemon_once(

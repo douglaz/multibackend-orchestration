@@ -239,6 +239,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             &pr.head_sha,
             diff,
             config.oracle_review_timeout_secs,
+            config.oracle_review_command.clone(),
             config.oracle_review_args.clone(),
         )
         .await
@@ -363,6 +364,7 @@ async fn invoke_oracle(
     head_sha: &str,
     diff: String,
     timeout_secs: u64,
+    oracle_command: String,
     extra_args: Vec<String>,
 ) -> Result<String> {
     let workspace_root = workspace_root.to_path_buf();
@@ -388,7 +390,14 @@ async fn invoke_oracle(
         })?;
 
         let result = (|| -> Result<String> {
-            let mut command = std::process::Command::new("oracle");
+            let is_npx = std::path::Path::new(&oracle_command)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|name| name == "npx");
+            let mut command = std::process::Command::new(&oracle_command);
+            if is_npx {
+                command.arg("-y").arg("@steipete/oracle");
+            }
             for arg in &extra_args {
                 command.arg(arg);
             }

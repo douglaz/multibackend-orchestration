@@ -2182,6 +2182,7 @@ mod tests {
                 oracle_review_authors: vec![],
                 oracle_review_max_per_cycle: 3,
                 oracle_review_cooldown_secs: 0,
+                oracle_review_command: "oracle".to_owned(),
                 oracle_review_args: vec![],
                 max_backend_retries: None,
                 pr_review_whitelist: vec![],
