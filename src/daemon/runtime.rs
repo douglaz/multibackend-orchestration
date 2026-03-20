@@ -87,6 +87,8 @@ pub struct DaemonRuntimeConfig {
     /// Minimum seconds of inactivity (since last PR update) before Oracle reviews a PR.
     /// Prevents reviewing PRs that are still being actively amended/rebased.
     pub oracle_review_cooldown_secs: u64,
+    /// Extra CLI arguments passed to the `oracle` command (e.g. `["--engine", "browser", "--browser-manual-login"]`).
+    pub oracle_review_args: Vec<String>,
     /// Executable used for git invocations in interactive PRD.
     pub git_bin: String,
     /// Executable used for GitHub CLI invocations in interactive PRD.
@@ -4818,6 +4820,7 @@ mod tests {
             oracle_review_authors: vec![],
             oracle_review_max_per_cycle: 3,
             oracle_review_cooldown_secs: 0,
+            oracle_review_args: vec![],
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,
@@ -4914,6 +4917,7 @@ mod tests {
             oracle_review_authors: vec![],
             oracle_review_max_per_cycle: 3,
             oracle_review_cooldown_secs: 0,
+            oracle_review_args: vec![],
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
             max_backend_retries: None,

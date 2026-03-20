@@ -239,6 +239,7 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             &pr.head_sha,
             diff,
             config.oracle_review_timeout_secs,
+            config.oracle_review_args.clone(),
         )
         .await
         {
@@ -362,6 +363,7 @@ async fn invoke_oracle(
     head_sha: &str,
     diff: String,
     timeout_secs: u64,
+    extra_args: Vec<String>,
 ) -> Result<String> {
     let workspace_root = workspace_root.to_path_buf();
     let head_sha = head_sha.to_owned();
@@ -387,6 +389,9 @@ async fn invoke_oracle(
 
         let result = (|| -> Result<String> {
             let mut command = std::process::Command::new("oracle");
+            for arg in &extra_args {
+                command.arg(arg);
+            }
             command
                 .arg("--prompt")
                 .arg(ORACLE_SYSTEM_PROMPT)
