@@ -87,6 +87,8 @@ pub struct OpenPrInfo {
     pub number: u32,
     pub head_sha: String,
     pub author: String,
+    /// Last activity timestamp (comments, commits, reviews).
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Poll open issues matching all supplied labels.
@@ -253,7 +255,7 @@ pub async fn list_open_non_draft_prs(
             "--state",
             "open",
             "--json",
-            "number,headRefOid,isDraft,author",
+            "number,headRefOid,isDraft,author,updatedAt",
             "--limit",
             "100",
         ])
@@ -1893,6 +1895,8 @@ struct RawOpenPrInfo {
     is_draft: bool,
     #[serde(default)]
     author: Option<RawAuthorLogin>,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2484,10 +2488,18 @@ pub fn parse_open_prs(raw: &str) -> Result<(Vec<OpenPrInfo>, bool)> {
     let prs = parsed
         .into_iter()
         .filter(|pr| !pr.is_draft)
-        .map(|pr| OpenPrInfo {
-            number: pr.number,
-            head_sha: pr.head_ref_oid,
-            author: pr.author.map(|author| author.login).unwrap_or_default(),
+        .map(|pr| {
+            let updated_at = pr
+                .updated_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            OpenPrInfo {
+                number: pr.number,
+                head_sha: pr.head_ref_oid,
+                author: pr.author.map(|author| author.login).unwrap_or_default(),
+                updated_at,
+            }
         })
         .collect();
     Ok((prs, overflow))
@@ -2544,7 +2556,7 @@ pub async fn list_open_non_draft_prs_with_timeout(
             "--state",
             "open",
             "--json",
-            "number,headRefOid,isDraft,author",
+            "number,headRefOid,isDraft,author,updatedAt",
             "--limit",
             "100",
         ],

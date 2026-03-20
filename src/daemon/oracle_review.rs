@@ -169,6 +169,19 @@ pub async fn oracle_review_phase(config: &DaemonRuntimeConfig) -> Result<()> {
             continue;
         }
 
+        // Skip PRs that were updated recently — wait for activity to settle
+        // so other reviewers/amendments can finish before oracle reviews.
+        if config.oracle_review_cooldown_secs > 0 {
+            if let Some(updated_at) = pr.updated_at {
+                let age = chrono::Utc::now()
+                    .signed_duration_since(updated_at)
+                    .num_seconds();
+                if age >= 0 && (age as u64) < config.oracle_review_cooldown_secs {
+                    continue;
+                }
+            }
+        }
+
         let marker = oracle_review_marker(pr.number, &pr.head_sha);
         match github::find_bot_comment_with_marker_exact_with_gh_bin_with_timeout(
             &config.gh_bin,

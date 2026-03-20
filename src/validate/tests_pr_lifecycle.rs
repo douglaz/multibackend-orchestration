@@ -426,6 +426,7 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         oracle_review_timeout_secs: 900,
         oracle_review_authors: vec![],
         oracle_review_max_per_cycle: 3,
+        oracle_review_cooldown_secs: 0,
         git_bin: "git".to_owned(),
         gh_bin: "gh".to_owned(),
         max_backend_retries: None,

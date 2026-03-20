@@ -2181,6 +2181,7 @@ mod tests {
                 oracle_review_timeout_secs: 900,
                 oracle_review_authors: vec![],
                 oracle_review_max_per_cycle: 3,
+                oracle_review_cooldown_secs: 0,
                 max_backend_retries: None,
                 pr_review_whitelist: vec![],
             },
