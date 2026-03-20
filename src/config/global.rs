@@ -97,6 +97,8 @@ pub struct WorkspaceConfig {
     pub daemon_oracle_review_max_per_cycle: u32,
     #[serde(default = "default_daemon_oracle_review_cooldown_secs")]
     pub daemon_oracle_review_cooldown_secs: u64,
+    #[serde(default)]
+    pub daemon_oracle_review_args: Vec<String>,
     /// Maximum backend timeout retries per invocation (default: 3, max: 10).
     #[serde(default)]
     pub daemon_max_backend_retries: Option<u8>,
@@ -552,6 +554,7 @@ impl Default for WorkspaceConfig {
             daemon_oracle_review_authors: Vec::new(),
             daemon_oracle_review_max_per_cycle: default_daemon_oracle_review_max_per_cycle(),
             daemon_oracle_review_cooldown_secs: default_daemon_oracle_review_cooldown_secs(),
+            daemon_oracle_review_args: Vec::new(),
             daemon_max_backend_retries: None,
             daemon_pr_review_whitelist: Vec::new(),
         }
@@ -1473,6 +1476,9 @@ pub(crate) fn set_global_config_value(
         }
         "workspace.daemon_oracle_review_cooldown_secs" => {
             config.workspace.daemon_oracle_review_cooldown_secs = cfg_parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_oracle_review_args" => {
+            config.workspace.daemon_oracle_review_args = cfg_parse_string_list(raw_value)?;
         }
         "workspace.daemon_pr_review_whitelist" => {
             config.workspace.daemon_pr_review_whitelist = cfg_parse_string_list(raw_value)?;
