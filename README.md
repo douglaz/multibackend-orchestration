@@ -1,3 +1,12 @@
+> [!WARNING]
+> **Deprecated — superseded by [rb-lite](https://github.com/douglaz/rb-lite).**
+>
+> This project (`ralph` / `multibackend-orchestration`) is no longer maintained.
+> Its role has been replaced by **rb-lite**, a smaller Bash CLI that drives an
+> implement → review loop with `codex` and `claude` as the implementer and
+> reviewer panel. Please use rb-lite for new work; the code here is kept for
+> historical reference only.
+
 # ralph
 
 `ralph` is a multi-backend orchestration tool for structured AI development loops.
