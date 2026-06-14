@@ -12,7 +12,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@v21
       - run: nix build -L
       - run: nix develop -c cargo clippy --all-targets -- -D warnings
